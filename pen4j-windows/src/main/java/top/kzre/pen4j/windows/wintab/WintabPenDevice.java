@@ -1,22 +1,19 @@
 package top.kzre.pen4j.windows.wintab;
 
-import com.sun.jna.Memory;
-import com.sun.jna.platform.win32.WinDef;
 import lombok.Getter;
+import lombok.ToString;
 import lombok.extern.slf4j.Slf4j;
 import top.kzre.pen4j.api.PenCapability;
 import top.kzre.pen4j.api.PenCursorType;
 import top.kzre.pen4j.api.PenDevice;
 import com.sun.jna.platform.win32.WinDef.*;
 
-import java.util.Collections;
-import java.util.EnumSet;
 import java.util.Set;
 
 @Slf4j
 @Getter
+@ToString
 class WintabPenDevice implements PenDevice {
-
     private final String name;
     private final String vendor;
     private final int maxX, maxY;

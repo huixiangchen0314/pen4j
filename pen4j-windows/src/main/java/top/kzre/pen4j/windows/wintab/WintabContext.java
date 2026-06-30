@@ -6,15 +6,18 @@ import com.sun.jna.platform.win32.WinDef.*;
 import com.sun.jna.platform.win32.WinNT.HANDLE;
 import lombok.extern.slf4j.Slf4j;
 import top.kzre.pen4j.windows.common.BOOLS;
-import top.kzre.pen4j.windows.common.UINTS;
 import top.kzre.pen4j.windows.common.LONGS;
+import top.kzre.pen4j.windows.common.UINTS;
 
 @Slf4j
 public class WintabContext implements AutoCloseable {
 
+    private static final int REQUESTED_MSG_BASE = 0x8000;   // 请求的消息基址
+
     private final HWND hwnd;
     private HANDLE hCtx;
     private final long pktDataMask;
+    private int actualMsgBase;            // 驱动实际分配的消息基址
 
     public WintabContext(HWND hwnd, long pktDataMask) {
         this.hwnd = hwnd;
@@ -22,22 +25,26 @@ public class WintabContext implements AutoCloseable {
     }
 
     public void open() {
+        if (hCtx != null) throw new IllegalStateException("Context already opened");
+
         LOGCONTEXTW ctx = buildContext();
         hCtx = WintabLibrary.INSTANCE.WTOpenW(hwnd, ctx, BOOLS.TRUE);
         if (hCtx == null || Pointer.nativeValue(hCtx.getPointer()) == 0) {
             throw new RuntimeException("WTOpenW failed");
         }
+
+        // 重新读取结构体，获取驱动实际写入的 lcMsgBase
+        ctx.read();
+        actualMsgBase = ctx.lcMsgBase.intValue();
+        log.info("Wintab context opened, HCTX={}, actual msgBase=0x{}",
+                hCtx, Integer.toHexString(actualMsgBase));
+
         WintabLibrary.INSTANCE.WTEnable(hCtx, BOOLS.TRUE);
-        log.info("Wintab context opened, HCTX={}", hCtx);
     }
 
-    public HANDLE getContextHandle() {
-        return hCtx;
-    }
-
-    public long getPktDataMask() {
-        return pktDataMask;
-    }
+    public HANDLE getHandle() { return hCtx; }
+    public long getPktDataMask() { return pktDataMask; }
+    public int getActualMsgBase() { return actualMsgBase; }
 
     @Override
     public synchronized void close() {
@@ -60,9 +67,13 @@ public class WintabContext implements AutoCloseable {
         if (ret.intValue() == 0) throw new RuntimeException("WTInfoW failed");
         ctx.read();
 
-        ctx.lcOptions = new UINT(WintabConst.CXO_SYSTEM | WintabConst.CXO_PEN);
-        ctx.lcPktData = new UINT(pktDataMask);
+        // 使用消息模式
+        long options = ctx.lcOptions.longValue();
+        options |= WintabConst.CXO_MESSAGES | WintabConst.CXO_PEN;
+        ctx.lcOptions = new UINT(options);
 
+        ctx.lcMsgBase = new UINT(REQUESTED_MSG_BASE);
+        ctx.lcPktData = new UINT(pktDataMask);
         ctx.lcPktMode = UINTS.ZERO;
         ctx.lcMoveMask = UINTS.ZERO;
         ctx.lcBtnDnMask = UINTS.ZERO;

@@ -1,10 +1,12 @@
 package top.kzre.pen4j.api;
 
 import lombok.Builder;
+import lombok.ToString;
 import lombok.Value;
 
 @Value
 @Builder
+@ToString
 public class PenState {
     /** 屏幕绝对坐标（原始像素值） */
     double x, y;

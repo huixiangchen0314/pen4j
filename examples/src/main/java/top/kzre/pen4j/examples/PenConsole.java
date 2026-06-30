@@ -7,6 +7,8 @@ import com.sun.jna.platform.win32.WinUser.*;
 import lombok.extern.slf4j.Slf4j;
 import top.kzre.pen4j.api.*;
 import top.kzre.pen4j.core.PenContext;
+import top.kzre.pen4j.core.spi.PenPlatformDriver;
+import top.kzre.pen4j.windows.ink.WindowsInkDriver;
 import top.kzre.pen4j.windows.wintab.WintabDriver;
 
 import static com.sun.jna.platform.win32.WinUser.*;
@@ -36,7 +38,7 @@ public class PenConsole {
 
         // 2. 用窗口句柄构造 Wintab 驱动
         long hwndVal = Pointer.nativeValue(hwnd.getPointer());
-        WintabDriver driver = new WintabDriver(hwndVal);
+        PenPlatformDriver driver = new WintabDriver(hwndVal);
 
         // 3. 创建 PenContext（传入驱动实例）
         try (PenContext ctx = PenContext.create(driver)) {
@@ -46,16 +48,7 @@ public class PenConsole {
                 public void onPenData(PenEvent event) {
                     PenState s = event.getState();
                     PenDevice dev = event.getDevice();
-                    System.out.printf("Pen: %s | X:%.4f Y:%.4f P:%.4f Near:%s Tip:%s B1:%s B2:%s Eraser:%s%n",
-                            dev.getName(),
-                            s.getX(), s.getY(),
-                            s.getPressure(),
-                            s.isNear(),
-                            s.isTipPressed(),
-                            s.isButton1Pressed(),
-                            s.isButton2Pressed(),
-                            s.isEraserPressed()
-                    );
+                    log.info("Pen state: {}, device: {}", s, dev);
                 }
 
                 @Override

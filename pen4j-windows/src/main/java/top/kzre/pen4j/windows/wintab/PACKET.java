@@ -23,6 +23,7 @@ public class PACKET {
     private final long x, y, z;
     private final long normalPressure, tangentPressure;
     private final long orientationAzimuth, orientationAltitude, orientationTwist;
+    private final long rotationRoll, rotationPitch, rotationYaw;
 
     public PACKET(byte[] raw, long mask) {
         ByteBuffer buf = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN);
@@ -41,6 +42,9 @@ public class PACKET {
         orientationAzimuth  = (mask & WintabConst.PK_ORIENTATION) != 0 ? buf.getInt() : -1;
         orientationAltitude = (mask & WintabConst.PK_ORIENTATION) != 0 ? buf.getInt() : -1;
         orientationTwist    = (mask & WintabConst.PK_ORIENTATION) != 0 ? buf.getInt() : -1;
+        rotationRoll   = (mask & WintabConst.PK_ROTATION) != 0 ? buf.getInt() : -1;
+        rotationPitch  = (mask & WintabConst.PK_ROTATION) != 0 ? buf.getInt() : -1;
+        rotationYaw    = (mask & WintabConst.PK_ROTATION) != 0 ? buf.getInt() : -1;
     }
 
     // 安全 getter，永不会抛异常
@@ -59,4 +63,7 @@ public class PACKET {
     public long getOrientationAzimuth()  { return orientationAzimuth; }
     public long getOrientationAltitude() { return orientationAltitude; }
     public long getOrientationTwist()    { return orientationTwist; }
+    public long getRotationRoll()  { return rotationRoll; }
+    public long getRotationPitch() { return rotationPitch; }
+    public long getRotationYaw()   { return rotationYaw; }
 }

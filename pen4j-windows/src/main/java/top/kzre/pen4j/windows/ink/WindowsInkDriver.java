@@ -1,283 +1,179 @@
 package top.kzre.pen4j.windows.ink;
 
-import com.sun.jna.Native;
-import com.sun.jna.platform.win32.*;
+import com.sun.jna.Pointer;
+import com.sun.jna.platform.win32.BaseTSD.ULONG_PTR;   // 新增
+import com.sun.jna.platform.win32.User32;
 import com.sun.jna.platform.win32.WinDef.*;
-import com.sun.jna.platform.win32.WinUser.*;
+import com.sun.jna.platform.win32.WinUser;
+import com.sun.jna.ptr.IntByReference;
 import lombok.extern.slf4j.Slf4j;
 import top.kzre.pen4j.api.*;
 import top.kzre.pen4j.core.DefaultPenEvent;
 import top.kzre.pen4j.core.spi.PenPlatformDriver;
+import top.kzre.pen4j.windows.common.ComCtl32;
 
 import java.util.*;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 @Slf4j
 public class WindowsInkDriver implements PenPlatformDriver {
-    private static final int CS_HREDRAW = 0x0002;
-    private static final int CS_VREDRAW = 0x0001;
 
-    private static final String WINDOW_CLASS = "Pen4JInkWindow_" + System.currentTimeMillis();
-    private static final int WS_EX_TOOLWINDOW = 0x00000080;
-    private static final int WS_EX_LAYERED = 0x00080000;
-    private static final int WS_EX_NOACTIVATE = 0x08000000;
-    private static final int LWA_ALPHA = 0x00000002;
-
-    private final List<PenDevice> devices = new ArrayList<>();
-    private final AtomicBoolean running = new AtomicBoolean(false);
+    private final HWND hwnd;
     private final AtomicReference<PenListener> listenerRef = new AtomicReference<>();
-    private final WindowsInkJNA ink = WindowsInkJNA.INSTANCE;
+    private final List<PenDevice> devices = new ArrayList<>();
+    private final WindowsInkParser parser = new WindowsInkParser();
 
-    private Thread messageThread;
-    private HWND hwnd;
-    private HMODULE hInstance;
+    private boolean started = false;
+    private ComCtl32.SUBCLASSPROC subClassProc;
+    private final UINT_PTR subClassId = new UINT_PTR(1L); // 修正：用 long 构造
+
+    public WindowsInkDriver(long nativeWindowHandle) {
+        this.hwnd = new HWND(Pointer.createConstant(nativeWindowHandle));
+        devices.add(new WindowsInkDevice());
+    }
 
     @Override
     public boolean isAvailable() {
-        try {
-            String osName = System.getProperty("os.name").toLowerCase();
-            return osName.contains("win");
-        } catch (Throwable e) {
-            log.debug("Windows Ink not available: {}", e.getMessage());
-            return false;
-        }
+        // 实际使用时可以调用 VerSetConditionMask + VerifyVersionInfo 检查 Windows 版本
+        // 这里简单返回 true
+        return true;
     }
 
     @Override
     public List<PenDevice> getDevices() {
-        return new ArrayList<>(devices);
+        return Collections.unmodifiableList(devices);
     }
 
     @Override
     public void start(PenListener listener) {
-        if (!running.compareAndSet(false, true)) return;
+        if (started) {
+            log.warn("WindowsInkDriver already started");
+            return;
+        }
+        Objects.requireNonNull(listener);
         listenerRef.set(listener);
 
-        int screenWidth = User32.INSTANCE.GetSystemMetrics(WinUser.SM_CXSCREEN);
-        int screenHeight = User32.INSTANCE.GetSystemMetrics(WinUser.SM_CYSCREEN);
+        // 通知设备
+        listener.onDeviceAdded(devices.get(0));
 
-        PenDevice device = new InkDevice(
-                "Windows Ink Digitizer",
-                "Microsoft",
-                screenWidth,
-                screenHeight,
-                1024,
-                0,
-                2,
-                "ink-digitizer-1"
-        );
-        devices.add(device);
-
-        messageThread = new Thread(this::messageLoop, "pen4j-ink-message");
-        messageThread.setDaemon(true);
-        messageThread.start();
-
-        log.info("Windows Ink driver started");
-    }
-
-    private void messageLoop() {
-        try {
-            hInstance = Kernel32.INSTANCE.GetModuleHandle(null);
-
-            WNDCLASSEX.ByReference wc = new WNDCLASSEX.ByReference();
-            wc.cbSize = wc.size();
-
-            // 使用匿名内部类实现WindowProc
-            wc.lpfnWndProc = new WindowProc() {
-                @Override
-                public LRESULT callback(HWND hWnd, int uMsg, WPARAM wParam, LPARAM lParam) {
-                    return windowProc(hWnd, uMsg, wParam, lParam);
-                }
-            };
-
-            wc.hInstance = hInstance;
-            wc.lpszClassName = WINDOW_CLASS;
-            wc.hbrBackground = null;
-            wc.style = CS_HREDRAW | CS_VREDRAW;
-
-            if (User32.INSTANCE.RegisterClassEx(wc) == null) {
-                log.error("Failed to register window class, error: {}", Native.getLastError());
-                return;
+        // 安装子类化回调
+        subClassProc = new ComCtl32.SUBCLASSPROC() {
+            @Override
+            public LRESULT callback(HWND hWnd, int uMsg, WPARAM wParam, LPARAM lParam,
+                                    UINT_PTR uIdSubclass, ULONG_PTR dwRefData) {
+                return handleSubclassMessage(hWnd, uMsg, wParam, lParam, uIdSubclass, dwRefData);
             }
-
-            hwnd = User32.INSTANCE.CreateWindowEx(
-                    WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
-                    WINDOW_CLASS,
-                    "Pen4J Ink Capture",
-                    WinUser.WS_POPUP,
-                    0, 0, 1, 1,
-                    null, null, hInstance, null
-            );
-
-            if (hwnd == null) {
-                log.error("Failed to create ink window, error: {}", Native.getLastError());
-                return;
-            }
-
-            User32.INSTANCE.SetLayeredWindowAttributes(hwnd, 0, (byte) 0, LWA_ALPHA);
-            User32.INSTANCE.ShowWindow(hwnd, WinUser.SW_SHOWNOACTIVATE);
-
-            ink.RegisterPointerInputTarget(hwnd, WindowsInkJNA.PT_PEN, 0);
-
-            MSG msg = new MSG();
-            while (running.get()) {
-                int result = User32.INSTANCE.GetMessage(msg, hwnd, 0, 0);
-                if (result == 0 || result == -1) {
-                    break;
-                }
-                User32.INSTANCE.TranslateMessage(msg);
-                User32.INSTANCE.DispatchMessage(msg);
-            }
-        } catch (Exception e) {
-            log.error("Error in ink message loop", e);
-        } finally {
-            cleanup();
-        }
-    }
-
-    private LRESULT windowProc(HWND hWnd, int uMsg, WPARAM wParam, LPARAM lParam) {
-        PenListener currentListener = listenerRef.get();
-        PenDevice device = devices.isEmpty() ? null : devices.get(0);
-
-        if (currentListener == null || device == null) {
-            return User32.INSTANCE.DefWindowProc(hWnd, uMsg, wParam, lParam);
+        };
+        // 修正：ULONG_PTR 构造参数使用 Pointer 或 long
+        if (!ComCtl32.INSTANCE.SetWindowSubclass(hwnd, subClassProc, subClassId,
+                new ULONG_PTR(0L))) {
+            throw new RuntimeException("SetWindowSubclass failed");
         }
 
-        switch (uMsg) {
-            case WindowsInkJNA.WM_POINTERUPDATE:
-            case WindowsInkJNA.WM_POINTERDOWN:
-            case WindowsInkJNA.WM_POINTERUP:
-            case WindowsInkJNA.WM_POINTERENTER:
-            case WindowsInkJNA.WM_POINTERLEAVE:
-                handlePointerEvent(uMsg, wParam, lParam, device, currentListener);
-                return new LRESULT(0);
-        }
-
-        return User32.INSTANCE.DefWindowProc(hWnd, uMsg, wParam, lParam);
-    }
-
-
-    private void handlePointerEvent(int msg, WPARAM wParam, LPARAM lParam,
-                                    PenDevice device, PenListener listener) {
-        int pointerId = wParam.intValue() & 0xFFFF;
-
-        WindowsInkJNA.POINTER_INFO.ByReference pInfo = new WindowsInkJNA.POINTER_INFO.ByReference();
-        if (!ink.GetPointerInfo(pointerId, pInfo).booleanValue()) {
-            return;
-        }
-
-        if (pInfo.pointerType != WindowsInkJNA.PT_PEN) {
-            return;
-        }
-
-        WindowsInkJNA.POINTER_PEN_INFO.ByReference penInfo = new WindowsInkJNA.POINTER_PEN_INFO.ByReference();
-        if (!ink.GetPointerPenInfo(pointerId, penInfo).booleanValue()) {
-            return;
-        }
-
-        double x = (double) pInfo.ptPixelLocation.x / device.getMaxX();
-        double y = (double) pInfo.ptPixelLocation.y / device.getMaxY();
-        double pressure = Math.min(1.0, (double) penInfo.pressure / 1024.0);
-        double tiltX = Math.max(-1.0, Math.min(1.0, (double) penInfo.tiltX / 90.0));
-        double tiltY = Math.max(-1.0, Math.min(1.0, (double) penInfo.tiltY / 90.0));
-        double twist = (double) penInfo.rotation;
-
-        boolean tipPressed = (msg == WindowsInkJNA.WM_POINTERDOWN) ||
-                ((msg == WindowsInkJNA.WM_POINTERUPDATE) &&
-                        (penInfo.penFlags & WindowsInkJNA.PEN_FLAG_INVERTED) == 0);
-        boolean barrelPressed = (penInfo.penFlags & WindowsInkJNA.PEN_FLAG_BARREL) != 0;
-        boolean eraserPressed = (penInfo.penFlags & WindowsInkJNA.PEN_FLAG_ERASER) != 0;
-        boolean near = (msg != WindowsInkJNA.WM_POINTERLEAVE);
-
-        PenState state = PenState.builder()
-                .x(x).y(y)
-                .pressure(pressure)
-                .tiltX(tiltX).tiltY(tiltY)
-                .twist(twist)
-                .near(near)
-                .tipPressed(tipPressed)
-                .button1Pressed(barrelPressed)
-                .button2Pressed(false)
-                .eraserPressed(eraserPressed)
-                .build();
-
-        listener.onPenData(new DefaultPenEvent(device, pInfo.dwTime * 1000L, state));
-    }
-
-    private void cleanup() {
-        if (hwnd != null) {
-            User32.INSTANCE.DestroyWindow(hwnd);
-            hwnd = null;
-        }
-        if (hInstance != null) {
-            User32.INSTANCE.UnregisterClass(WINDOW_CLASS, hInstance);
-        }
+        started = true;
+        log.info("WindowsInkDriver started on HWND={}", hwnd);
     }
 
     @Override
     public void stop() {
-        if (running.compareAndSet(true, false)) {
-            if (hwnd != null) {
-                User32.INSTANCE.PostMessage(hwnd, WinUser.WM_QUIT, new WPARAM(0), new LPARAM(0));
-            }
+        if (!started) return;
+        started = false;
 
-            if (messageThread != null) {
-                try {
-                    messageThread.join(1000);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-
-            devices.clear();
-            listenerRef.set(null);
-            log.info("Windows Ink driver stopped");
+        if (subClassProc != null) {
+            ComCtl32.INSTANCE.RemoveWindowSubclass(hwnd, subClassProc, subClassId);
+            subClassProc = null;
         }
+        devices.clear();
+        log.info("WindowsInkDriver stopped");
     }
 
-    private static class InkDevice implements PenDevice {
-        private final String name, vendor;
-        private final int maxX, maxY, maxPressure, maxProximity, sideButtonCount;
-        private final String uid;
+    private LRESULT handleSubclassMessage(HWND hWnd, int msg, WPARAM wParam, LPARAM lParam,
+                                          UINT_PTR uIdSubclass, ULONG_PTR dwRefData) {
+        switch (msg) {
+            case PointerConstants.WM_POINTERDOWN:
+            case PointerConstants.WM_POINTERUP:
+            case PointerConstants.WM_POINTERUPDATE:
+                handlePointerMessage(msg, wParam);
+                break;
+        }
+        return ComCtl32.INSTANCE.DefSubclassProc(hWnd, msg, wParam, lParam);
+    }
 
-        InkDevice(String name, String vendor, int maxX, int maxY, int maxPressure,
-                  int maxProximity, int sideButtonCount, String uid) {
-            this.name = name;
-            this.vendor = vendor;
-            this.maxX = maxX;
-            this.maxY = maxY;
-            this.maxPressure = maxPressure;
-            this.maxProximity = maxProximity;
-            this.sideButtonCount = sideButtonCount;
-            this.uid = uid;
+    private void handlePointerMessage(int msg, WPARAM wParam) {
+        int pointerId = wParam.intValue() & 0xFFFF;
+        IntByReference pointerType = new IntByReference();
+        if (!User32Ex.INSTANCE.GetPointerType(pointerId, pointerType)) return;
+        if (pointerType.getValue() != PointerConstants.PT_PEN) return;
+
+        PointerPenInfo.ByReference penInfo = new PointerPenInfo.ByReference();
+        if (!User32Ex.INSTANCE.GetPointerPenInfo(pointerId, penInfo)) return;
+
+        PenListener listener = listenerRef.get();
+        if (listener == null) return;
+        PenDevice dev = devices.get(0);
+
+        PenState state = parser.parse(penInfo, msg);
+        PenEvent event = new DefaultPenEvent(dev, System.currentTimeMillis() * 1000, state);
+        listener.onPenData(event);
+    }
+
+    // 内部设备
+    private static class WindowsInkDevice implements PenDevice {
+        @Override
+        public String getName() {
+            return "Windows Ink Pen";
         }
 
-        @Override public String getName() { return name; }
-        @Override public String getVendor() { return vendor; }
-        @Override public int getMaxX() { return maxX; }
-        @Override public int getMaxY() { return maxY; }
-        @Override public int getMaxPressure() { return maxPressure; }
-        @Override public int getMaxProximity() { return maxProximity; }
-        @Override public int getSideButtonCount() { return sideButtonCount; }
-        @Override public String getUid() { return uid; }
+        @Override
+        public String getVendor() {
+            return "Microsoft";
+        }
+
+        @Override
+        public int getMaxX() {
+            return User32.INSTANCE.GetSystemMetrics(WinUser.SM_CXSCREEN);
+        }
+
+        @Override
+        public int getMaxY() {
+            return User32.INSTANCE.GetSystemMetrics(WinUser.SM_CYSCREEN);
+        }
+
+        @Override
+        public int getMaxPressure() {
+            return 1024; // Windows Ink 压力值范围 0-1024
+        }
+
+        @Override
+        public int getMaxProximity() {
+            return 0;    // Windows Ink 不提供悬停距离
+        }
+
+        @Override
+        public int getSideButtonCount() {
+            return 1;    // 默认至少一个笔杆按钮
+        }
+
+        @Override
+        public String getUid() {
+            return "windows-ink-pen-0";
+        }
 
         @Override
         public boolean supports(PenCapability capability) {
+            // 只声明已知可用的能力，避免不存在的枚举值
             switch (capability) {
-                case PRESSURE: return true;
-                case TILT: return true;
-                case TWIST: return true;
-                case PROXIMITY: return true;
-                case SIDE_BUTTON: return sideButtonCount > 0;
-                case ERASER: return true;
-                default: return false;
+                case PRESSURE:
+                case TILT:
+                    return true;
+                default:
+                    return false;
             }
         }
 
         @Override
         public Set<PenCursorType> getSupportedCursorTypes() {
-            return EnumSet.of(PenCursorType.PEN, PenCursorType.ERASER);
+            return Collections.singleton(PenCursorType.PEN);
         }
     }
 }
