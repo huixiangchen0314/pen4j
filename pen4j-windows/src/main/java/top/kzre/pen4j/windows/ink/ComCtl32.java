@@ -1,4 +1,4 @@
-package top.kzre.pen4j.windows.common;
+package top.kzre.pen4j.windows.ink;
 
 import com.sun.jna.Native;
 import com.sun.jna.platform.win32.BaseTSD.*;

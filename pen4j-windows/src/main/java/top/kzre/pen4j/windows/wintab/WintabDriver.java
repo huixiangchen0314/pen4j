@@ -8,7 +8,7 @@ import com.sun.jna.platform.win32.WinNT.HANDLE;
 import lombok.extern.slf4j.Slf4j;
 import top.kzre.pen4j.api.*;
 import top.kzre.pen4j.core.DefaultPenEvent;
-import top.kzre.pen4j.core.spi.PenPlatformDriver;
+import top.kzre.pen4j.core.PenPlatformDriver;
 
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;

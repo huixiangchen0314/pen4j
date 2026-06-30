@@ -2,13 +2,10 @@ package top.kzre.pen4j.examples;
 
 import com.sun.jna.Pointer;
 import com.sun.jna.platform.win32.*;
-import com.sun.jna.platform.win32.WinDef.*;
-import com.sun.jna.platform.win32.WinUser.*;
 import lombok.extern.slf4j.Slf4j;
 import top.kzre.pen4j.api.*;
 import top.kzre.pen4j.core.PenContext;
-import top.kzre.pen4j.core.spi.PenPlatformDriver;
-import top.kzre.pen4j.windows.ink.WindowsInkDriver;
+import top.kzre.pen4j.core.PenPlatformDriver;
 import top.kzre.pen4j.windows.wintab.WintabDriver;
 
 import static com.sun.jna.platform.win32.WinUser.*;

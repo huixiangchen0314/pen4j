@@ -1,4 +1,4 @@
-package top.kzre.pen4j.core.spi;
+package top.kzre.pen4j.core;
 
 import top.kzre.pen4j.api.PenDevice;
 import top.kzre.pen4j.api.PenListener;

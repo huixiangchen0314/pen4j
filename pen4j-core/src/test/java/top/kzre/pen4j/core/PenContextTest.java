@@ -3,7 +3,6 @@ package top.kzre.pen4j.core;
 import org.junit.jupiter.api.*;
 import org.mockito.*;
 import top.kzre.pen4j.api.*;
-import top.kzre.pen4j.core.spi.PenPlatformDriver;
 
 import java.util.*;
 import java.util.concurrent.CountDownLatch;

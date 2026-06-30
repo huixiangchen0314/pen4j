@@ -4,7 +4,6 @@ import lombok.extern.slf4j.Slf4j;
 import top.kzre.pen4j.api.PenDevice;
 import top.kzre.pen4j.api.PenEvent;
 import top.kzre.pen4j.api.PenListener;
-import top.kzre.pen4j.core.spi.PenPlatformDriver;
 
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
