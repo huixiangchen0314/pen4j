@@ -13,8 +13,7 @@ class PenStateTest {
                 .twist(45.0)
                 .near(true)
                 .tipPressed(true)
-                .button1Pressed(false)
-                .button2Pressed(false)
+
                 .eraserPressed(false)
                 .build();
 

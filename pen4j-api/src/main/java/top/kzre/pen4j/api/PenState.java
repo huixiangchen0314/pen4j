@@ -36,12 +36,22 @@ public class PenState {
     PenCursorType cursorType;
     /** 笔硬件序列号 */
     long serialNumber;
-    /** 原始按钮掩码 */
+    /** 原始按钮位掩码，bit0 = 按钮1，bit1 = 按钮2，…… */
     int buttons;
-    /** 以下为解析后的常用状态 */
+    /** 笔是否处于感应范围内 */
     boolean near;
+    /** 笔尖是否接触表面 */
     boolean tipPressed;
-    boolean button1Pressed;
-    boolean button2Pressed;
+    /** 是否为橡皮擦模式（由光标类型或硬件标志决定） */
     boolean eraserPressed;
+
+    /**
+     * 便捷方法：检测第 index 个按钮是否按下（index 从 1 开始）。
+     * @param index 按钮编号（1-based）
+     * @return true 表示按下
+     */
+    public boolean isButtonPressed(int index) {
+        if (index < 1) return false;
+        return ((buttons >> (index - 1)) & 1) != 0;
+    }
 }

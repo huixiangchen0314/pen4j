@@ -14,6 +14,13 @@ import top.kzre.pen4j.core.PenPlatformDriver;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 
+/**
+ * Pointer API + 子类化的方案，由于必须消息泵，只能走子类化路径，无法全局查询.
+ * 如果用独立窗口的话又必须是焦点窗口，否则 就得注册全局消息钩子，不实用.
+ *
+ * 在复杂场景下可能和 自定义消息冲突(已知和 JavaFX 无法兼容,会导致界面无响应)，
+ * 推荐使用 RawInput 方案.
+ */
 @Slf4j
 public final class WindowsInkDriver implements PenPlatformDriver {
 
@@ -130,6 +137,11 @@ public final class WindowsInkDriver implements PenPlatformDriver {
         }
 
         @Override
+        public int getVid() {
+            return 0;
+        }
+
+        @Override
         public int getMaxX() {
             return User32.INSTANCE.GetSystemMetrics(WinUser.SM_CXSCREEN);
         }
@@ -154,6 +166,9 @@ public final class WindowsInkDriver implements PenPlatformDriver {
             return 1;    // 默认至少一个笔杆按钮
         }
 
+        /**
+         * 暂不支持多笔
+         */
         @Override
         public String getUid() {
             return "windows-ink-pen-0";

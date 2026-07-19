@@ -37,3 +37,55 @@ build/
 
 ### Mac OS ###
 .DS_Store
+
+## Visual Studio ###
+# User-specific files
+*.suo
+*.user
+*.sln.docstates
+*.vcxproj.user
+*.dbmdl
+
+# Visual Studio version folder
+.vs/
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+[Bb]in/
+[Oo]bj/
+
+# Generated binaries and debug files
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.iobj
+*.ipdb
+*.pch
+*.obj
+*.res
+*.tlb
+*.tlh
+*.bak
+*.tmp
+*.log
+*.tlog
+*.idb
+*.lastbuildstate
+*.unsuccessfulbuild
+
+# Other common Visual Studio temporary files
+*.sdf
+*.opensdf
+*.ncb
+*.opt
+*.plg
+*.aps
+*.map
+*.metagen
+
+# 保留资源目录中的本地库
+!**/src/main/resources/**/*.dll

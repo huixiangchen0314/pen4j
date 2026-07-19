@@ -23,6 +23,9 @@ public class WindowsInkParser {
 
         PenCursorType cursorType = eraser ? PenCursorType.ERASER : PenCursorType.PEN;
 
+        // 按钮掩码：barrel 按钮 → bit0
+        int buttons = barrel ? 1 : 0;
+
         return PenState.builder()
                 .x(x)
                 .y(y)
@@ -30,10 +33,9 @@ public class WindowsInkParser {
                 .tiltX(tiltX)
                 .tiltY(tiltY)
                 .cursorType(cursorType)
-                .near(true)                    // Windows Ink 收到消息即表示笔在附近
+                .near(true)
                 .tipPressed(inContact)
-                .button1Pressed(barrel)
-                .button2Pressed(false)
+                .buttons(buttons)
                 .eraserPressed(eraser)
                 .build();
     }

@@ -4,7 +4,6 @@ import com.sun.jna.Pointer;
 import com.sun.jna.platform.win32.*;
 import com.sun.jna.platform.win32.WinDef.*;
 import com.sun.jna.platform.win32.WinNT.HANDLE;
-import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import top.kzre.pen4j.windows.common.BOOLS;
 import top.kzre.pen4j.windows.common.LONGS;
@@ -17,9 +16,7 @@ public class WintabContext implements AutoCloseable {
 
     private final HWND hwnd;
     private HANDLE hCtx;
-    @Getter
     private final long pktDataMask;
-    @Getter
     private int actualMsgBase;            // 驱动实际分配的消息基址
 
     public WintabContext(HWND hwnd, long pktDataMask) {
@@ -46,6 +43,8 @@ public class WintabContext implements AutoCloseable {
     }
 
     public HANDLE getHandle() { return hCtx; }
+    public long getPktDataMask() { return pktDataMask; }
+    public int getActualMsgBase() { return actualMsgBase; }
 
     @Override
     public synchronized void close() {

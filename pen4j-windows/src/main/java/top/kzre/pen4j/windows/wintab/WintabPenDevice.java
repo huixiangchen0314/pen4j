@@ -45,6 +45,11 @@ class WintabPenDevice implements PenDevice {
     }
 
     @Override
+    public int getVid() {
+        return 0;
+    }
+
+    @Override
     public boolean supports(PenCapability cap) {
         return caps.contains(cap);
     }

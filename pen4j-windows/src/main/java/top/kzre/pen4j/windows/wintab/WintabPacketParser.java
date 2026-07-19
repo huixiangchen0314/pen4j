@@ -1,6 +1,7 @@
 package top.kzre.pen4j.windows.wintab;
 
 import top.kzre.pen4j.api.*;
+import top.kzre.pen4j.windows.common.WinConstants;
 
 final class WintabPacketParser {
 
@@ -92,8 +93,7 @@ final class WintabPacketParser {
                 .buttons(buttons)          // 保留原始 buttons 值，便于调试
                 .near(near)
                 .tipPressed(tipPressed)
-                .button1Pressed(button1Pressed)
-                .button2Pressed(button2Pressed)
+                .buttons(buttons)
                 .eraserPressed(eraserPressed)
                 .build();
     }

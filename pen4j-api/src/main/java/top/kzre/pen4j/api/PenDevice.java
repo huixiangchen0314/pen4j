@@ -14,6 +14,14 @@ public interface PenDevice {
     /** 厂商名称，如 "Wacom"、"Huion" */
     String getVendor();
 
+    /**
+     * 获取 USB Vendor ID（厂商 ID）。
+     * 如果无法获取或设备不是 USB 设备，返回 0。
+     *
+     * @return 16 位无符号整数形式的 VID
+     */
+    int getVid();
+
     /** 逻辑坐标系最大 X 值 */
     int getMaxX();
 
