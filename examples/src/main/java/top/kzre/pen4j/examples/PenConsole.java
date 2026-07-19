@@ -6,15 +6,15 @@ import lombok.extern.slf4j.Slf4j;
 import top.kzre.pen4j.api.*;
 import top.kzre.pen4j.core.PenContext;
 import top.kzre.pen4j.core.PenPlatformDriver;
-import top.kzre.pen4j.windows.ink.WindowsInkDriver;
-import top.kzre.pen4j.windows.rawinput.RawInputDriver;
-import top.kzre.pen4j.windows.wintab.WintabDriver;
+import top.kzre.pen4j.windows.wintab.WinTabDriver;
 
 import static com.sun.jna.platform.win32.WinUser.*;
 
 /**
  * 控制台演示：创建一个极小的焦点窗口用于 WinTab 驱动，实时打印笔事件。
  * 按 ESC 或等待 60 秒自动退出。
+ * <p>
+ * 已添加详细日志以定位退出时的堆损坏问题。
  */
 @Slf4j
 public class PenConsole {
@@ -37,7 +37,7 @@ public class PenConsole {
 
         // 2. 用窗口句柄构造 Wintab 驱动
         long hwndVal = Pointer.nativeValue(hwnd.getPointer());
-        PenPlatformDriver driver = new WintabDriver(hwndVal);
+        PenPlatformDriver driver = new WinTabDriver();
 
         // 3. 创建 PenContext（传入驱动实例）
         try (PenContext ctx = PenContext.create(driver)) {
@@ -81,9 +81,19 @@ public class PenConsole {
                 Thread.sleep(10);
             }
         } finally {
-            // 清理窗口
+            log.info("Starting cleanup sequence...");
+            // PenContext 已自动调用 driver.stop()（通过 try-with-resources）
+            log.info("Driver should be stopped at this point.");
+
+            log.info("Destroying window...");
             User32.INSTANCE.DestroyWindow(hwnd);
+            log.info("Window destroyed.");
+
+            log.info("Unregistering window class...");
             User32.INSTANCE.UnregisterClass(WINDOW_CLASS, Kernel32.INSTANCE.GetModuleHandle(null));
+            log.info("Window class unregistered.");
+
+            log.info("Cleanup sequence completed.");
         }
         log.info("Demo finished.");
     }
