@@ -29,6 +29,28 @@ public class WintabDriver implements PenPlatformDriver {
     private volatile boolean running;
     private Thread pollThread;
 
+    // 设备变更监听器，保持强引用
+    private final WintabPenProbe.DeviceChangeListener deviceChangeListener =
+            new WintabPenProbe.DeviceChangeListener() {
+                @Override
+                public void onDeviceAdded(WintabPenDevice device) {
+                    devices.add(device);
+                    PenListener listener = listenerRef.get();
+                    if (listener != null) {
+                        listener.onDeviceAdded(device);
+                    }
+                }
+
+                @Override
+                public void onDeviceRemoved(WintabPenDevice device) {
+                    devices.remove(device);
+                    PenListener listener = listenerRef.get();
+                    if (listener != null) {
+                        listener.onDeviceRemoved(device);
+                    }
+                }
+            };
+
     public WintabDriver(long nativeWindowHandle) {
         this.hwnd = new HWND(Pointer.createConstant(nativeWindowHandle));
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -62,19 +84,27 @@ public class WintabDriver implements PenPlatformDriver {
         Objects.requireNonNull(listener);
         listenerRef.set(listener);
 
-        enumerateDevices();
-        devices.forEach(listener::onDeviceAdded);
+        // 使用单例探测器刷新并加载当前设备列表
+        WintabPenProbe probe = WintabPenProbe.getInstance();
+        probe.refreshDevices();
+        List<WintabPenDevice> initialDevices = probe.getDevices();
+        devices.clear();
+        devices.addAll(initialDevices);
+        initialDevices.forEach(listener::onDeviceAdded);
 
-        // 数据掩码
+        // 注册设备热插拔监听
+        probe.addDeviceListener(deviceChangeListener);
+
+        // 数据掩码（与原有逻辑一致）
         long mask = WintabConst.PK_TIME | WintabConst.PK_X | WintabConst.PK_Y |
                 WintabConst.PK_NORMALPRESSURE | WintabConst.PK_STATUS |
                 WintabConst.PK_BUTTONS | WintabConst.PK_CHANGED |
                 WintabConst.PK_ORIENTATION | WintabConst.PK_ROTATION;
 
-        // 创建上下文（轮询模式：lcMsgBase = 0）
+        // 创建上下文（轮询模式）
         context = new WintabContext(hwnd, mask);
 
-        // 打开上下文（只需一次 SetForegroundWindow 帮助绑定）
+        // 打开上下文
         User32.INSTANCE.SetForegroundWindow(hwnd);
         try { Thread.sleep(50); } catch (InterruptedException ignored) {}
 
@@ -87,7 +117,7 @@ public class WintabDriver implements PenPlatformDriver {
 
         parser = new WintabPacketParser(context.getPktDataMask());
 
-        // 启动纯轮询线程：无任何窗口消息处理
+        // 启动纯轮询线程（数据包解析部分完全不变）
         running = true;
         pollThread = new Thread(() -> {
             while (running) {
@@ -100,7 +130,7 @@ public class WintabDriver implements PenPlatformDriver {
         pollThread.setDaemon(true);
         pollThread.start();
 
-        log.info("WintabDriver started (poll-only thread)");
+        log.info("WintabDriver started (poll-only thread, with device change listener)");
     }
 
     @Override
@@ -110,6 +140,9 @@ public class WintabDriver implements PenPlatformDriver {
     }
 
     private synchronized void cleanup() {
+        // 移除设备变更监听
+        WintabPenProbe.getInstance().removeDeviceListener(deviceChangeListener);
+
         if (pollThread != null) {
             pollThread.interrupt();
             try { pollThread.join(2000); } catch (InterruptedException ignored) {}
@@ -124,11 +157,7 @@ public class WintabDriver implements PenPlatformDriver {
         log.info("WintabDriver cleaned up.");
     }
 
-    private void enumerateDevices() {
-        devices.clear();
-        devices.addAll(WintabPenProbe.probeAll());
-    }
-
+    // ─── 以下方法完全不变 ───
     private void pollPackets() {
         HANDLE hCtx = context.getHandle();
         if (hCtx == null || Pointer.nativeValue(hCtx.getPointer()) == 0) return;

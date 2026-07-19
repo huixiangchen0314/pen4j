@@ -6,36 +6,214 @@ import lombok.extern.slf4j.Slf4j;
 import top.kzre.pen4j.api.PenCapability;
 import top.kzre.pen4j.api.PenCursorType;
 
+import java.lang.ref.WeakReference;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * WinTab 笔设备探测器。
- * 通过 WTInfoW 动态查询所有可用的设备 / 光标，并构建 WintabPenDevice 列表。
+ * WinTab 笔设备探测器（单例）。
+ * 提供设备枚举、缓存，以及基于弱引用的设备变更监听（自动启停后台轮询）。
  */
 @Slf4j
-final class WintabPenProbe {
+public final class WintabPenProbe {
 
-    private WintabPenProbe() {}
+    // ───────── 设备变更监听器接口 ─────────
+    public interface DeviceChangeListener {
+        void onDeviceAdded(WintabPenDevice device);
+        void onDeviceRemoved(WintabPenDevice device);
+    }
+
+    // ───────── 单例 ─────────
+    private static final WintabPenProbe INSTANCE = new WintabPenProbe();
+
+    private WintabPenProbe() {
+        refreshDevices(); // 初始化设备列表
+    }
+
+    public static WintabPenProbe getInstance() {
+        return INSTANCE;
+    }
+
+    // ───────── 设备变更监听（弱引用） ─────────
+    private final ScheduledPoll poller = new ScheduledPoll();
+
+    public void addDeviceListener(DeviceChangeListener listener) {
+        poller.addListener(listener);
+    }
+
+    public void removeDeviceListener(DeviceChangeListener listener) {
+        poller.removeListener(listener);
+    }
+
+    // ───────── 设备缓存 ─────────
+    private final Object cacheLock = new Object();
+    private volatile List<WintabPenDevice> cachedDevices = Collections.emptyList();
 
     /**
-     * 探测当前系统所有可用的 WinTab 笔设备（每个光标作为一个逻辑设备）。
-     * 典型情况：设备 0 的光标 0 为钢笔，光标 1 为橡皮擦。
+     * 获取当前缓存的设备列表（不可变快照）。
+     */
+    public List<WintabPenDevice> getDevices() {
+        synchronized (cacheLock) {
+            return new ArrayList<>(cachedDevices);
+        }
+    }
+
+    /**
+     * 强制刷新设备列表（主动探测）。
+     * 内部调用原始探测逻辑，并更新缓存。
+     */
+    public void refreshDevices() {
+        List<WintabPenDevice> fresh = doProbeAll();
+        synchronized (cacheLock) {
+            cachedDevices = Collections.unmodifiableList(fresh);
+        }
+        log.debug("Device cache refreshed, {} devices found", fresh.size());
+    }
+
+    // ───────── 公开静态方法（兼容旧调用） ─────────
+    /**
+     * 静态探测方法，保持原有 JNA 调用逻辑不变。
+     * 该方法每次都会触发完整的设备枚举，但不会影响单例缓存。
+     * @return 探测到的设备列表
      */
     public static List<WintabPenDevice> probeAll() {
+        // 直接调用原始实现，确保行为与之前完全一致
+        return doProbeAll();
+    }
+
+    // ───────── 内部轮询器 ─────────
+    private class ScheduledPoll {
+        private final List<WeakReference<DeviceChangeListener>> listeners = new ArrayList<>();
+        private final Object listenersLock = new Object();
+
+        private Thread pollThread;
+        private final AtomicBoolean running = new AtomicBoolean(false);
+        private List<WintabPenDevice> lastSnapshot = Collections.emptyList();
+
+        void addListener(DeviceChangeListener listener) {
+            synchronized (listenersLock) {
+                // 清理已释放的弱引用
+                listeners.removeIf(ref -> ref.get() == null);
+                // 避免重复添加
+                for (WeakReference<DeviceChangeListener> ref : listeners) {
+                    if (ref.get() == listener) return;
+                }
+                listeners.add(new WeakReference<>(listener));
+                updatePollingState();
+            }
+        }
+
+        void removeListener(DeviceChangeListener listener) {
+            synchronized (listenersLock) {
+                listeners.removeIf(ref -> {
+                    DeviceChangeListener l = ref.get();
+                    return l == null || l == listener;
+                });
+                updatePollingState();
+            }
+        }
+
+        private int countActiveListeners() {
+            synchronized (listenersLock) {
+                listeners.removeIf(ref -> ref.get() == null);
+                return listeners.size();
+            }
+        }
+
+        private void updatePollingState() {
+            boolean hasListeners = countActiveListeners() > 0;
+            if (hasListeners && running.compareAndSet(false, true)) {
+                startPolling();
+            } else if (!hasListeners && running.compareAndSet(true, false)) {
+                stopPolling();
+            }
+        }
+
+        private void startPolling() {
+            lastSnapshot = getDevices();   // 使用外部类的缓存快照
+            pollThread = new Thread(this::pollLoop, "Wintab-Device-Poller");
+            pollThread.setDaemon(true);
+            pollThread.start();
+            log.debug("Wintab device polling started");
+        }
+
+        private void stopPolling() {
+            if (pollThread != null) {
+                pollThread.interrupt();
+                pollThread = null;
+            }
+            log.debug("Wintab device polling stopped");
+        }
+
+        private void pollLoop() {
+            while (running.get()) {
+                try {
+                    Thread.sleep(5000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+                if (countActiveListeners() == 0) {
+                    running.set(false);
+                    break;
+                }
+                checkForDeviceChanges();
+            }
+            running.set(false);
+        }
+
+        private void checkForDeviceChanges() {
+            // 主动刷新设备列表（这会调用 doProbeAll 并更新缓存）
+            refreshDevices();
+            List<WintabPenDevice> current = getDevices();
+
+            Set<String> oldUids = new HashSet<>();
+            for (WintabPenDevice d : lastSnapshot) oldUids.add(d.getUid());
+            Set<String> newUids = new HashSet<>();
+            for (WintabPenDevice d : current) newUids.add(d.getUid());
+
+            List<DeviceChangeListener> activeListeners = new ArrayList<>();
+            synchronized (listenersLock) {
+                listeners.removeIf(ref -> ref.get() == null);
+                for (WeakReference<DeviceChangeListener> ref : listeners) {
+                    DeviceChangeListener l = ref.get();
+                    if (l != null) activeListeners.add(l);
+                }
+            }
+
+            for (WintabPenDevice d : current) {
+                if (!oldUids.contains(d.getUid())) {
+                    for (DeviceChangeListener l : activeListeners) {
+                        l.onDeviceAdded(d);
+                    }
+                }
+            }
+            for (WintabPenDevice d : lastSnapshot) {
+                if (!newUids.contains(d.getUid())) {
+                    for (DeviceChangeListener l : activeListeners) {
+                        l.onDeviceRemoved(d);
+                    }
+                }
+            }
+            lastSnapshot = current;
+        }
+    }
+
+    // ───────── 原始探测逻辑（私有，保持与之前完全一致） ─────────
+    /**
+     * 核心设备探测，保持原有 JNA 调用不变。
+     */
+    private static List<WintabPenDevice> doProbeAll() {
         List<WintabPenDevice> list = new ArrayList<>();
         try {
-            // 获取设备数量（这里假设一台物理设备，光标可能有多个）
             int deviceIdx = 0;
-            // 尝试探测光标 0（通常为钢笔）
             WintabPenDevice pen = probeCursor(deviceIdx, 0);
             if (pen != null) list.add(pen);
-            // 尝试探测光标 1（通常为橡皮擦）
             WintabPenDevice eraser = probeCursor(deviceIdx, 1);
             if (eraser != null) list.add(eraser);
         } catch (Exception e) {
             log.error("Failed to probe WinTab devices", e);
         }
-        // 若全部失败，回退硬编码（防止驱动空指针）
         if (list.isEmpty()) {
             log.warn("No WinTab devices found, using fallback defaults");
             list.add(createFallbackPen());
@@ -44,6 +222,7 @@ final class WintabPenProbe {
         return list;
     }
 
+    // ───────── 以下全部是原有私有方法，未做任何更改 ─────────
     private static WintabPenDevice probeCursor(int deviceIdx, int cursorIdx) {
         try {
             // 1. 检查光标是否存在（CSR_NAME）

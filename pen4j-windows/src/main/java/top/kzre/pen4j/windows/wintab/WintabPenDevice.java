@@ -13,7 +13,7 @@ import java.util.Set;
 @Slf4j
 @Getter
 @ToString
-class WintabPenDevice implements PenDevice {
+public class WintabPenDevice implements PenDevice {
     private final String name;
     private final String vendor;
     private final int maxX, maxY;
