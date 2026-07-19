@@ -4,6 +4,7 @@ import com.sun.jna.Pointer;
 import com.sun.jna.ptr.IntByReference;
 import lombok.extern.slf4j.Slf4j;
 import top.kzre.pen4j.api.*;
+import top.kzre.pen4j.core.BasePenDevice;
 import top.kzre.pen4j.core.DefaultPenEvent;
 import top.kzre.pen4j.core.PenPlatformDriver;
 import top.kzre.pen4j.windows.common.PenVendorVIDTable;
@@ -183,52 +184,11 @@ public class RawInputDriver implements PenPlatformDriver {
         }
     }
 
-    // 内部设备描述（动态更新）
-    private static class RawInputDevice implements PenDevice {
-        private String name = "Unknown";
-        private String vendor = "Unknown";
-        private String uid = "raw-pen-0";
-        private int vid = 0;
-        private int pid = 0;
-        private int maxX = 65535;
-        private int maxY = 65535;
-        private int maxPressure = 1023;
-        private int sideButtonCount = 2;
-
-        void setName(String name) { this.name = name; }
-        void setVendor(String vendor) { this.vendor = vendor; }
-        void setUid(String uid) { this.uid = uid; }
-        void setVid(int vid) { this.vid = vid; }
-        void setPid(int pid) { this.pid = pid; }
-        void setMaxX(int maxX) { this.maxX = maxX; }
-        void setMaxY(int maxY) { this.maxY = maxY; }
-        void setMaxPressure(int maxPressure) { this.maxPressure = maxPressure; }
-        void setSideButtonCount(int count) { this.sideButtonCount = count; }
-
-        @Override public String getName() { return name; }
-        @Override public String getVendor() { return vendor; }
-        @Override public int getVid() { return vid; }
-        @Override public String getUid() { return uid; }
-        @Override public int getMaxX() { return maxX; }
-        @Override public int getMaxY() { return maxY; }
-        @Override public int getMaxPressure() { return maxPressure; }
-        @Override public int getMaxProximity() { return 0; }
-        @Override public int getSideButtonCount() { return sideButtonCount; }
-
-        @Override
-        public boolean supports(PenCapability capability) {
-            switch (capability) {
-                case PRESSURE:
-                case TILT:
-                    return true;
-                default:
-                    return false;
-            }
-        }
-
-        @Override
-        public Set<PenCursorType> getSupportedCursorTypes() {
-            return Collections.singleton(PenCursorType.PEN);
+    private static class RawInputDevice extends BasePenDevice {
+        {
+            setName("Raw Input Pen");
+            setCaps(EnumSet.of(PenCapability.PRESSURE, PenCapability.TILT));
+            setSupportedCursorTypes(EnumSet.of(PenCursorType.PEN));
         }
     }
 }
