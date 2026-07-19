@@ -6,6 +6,7 @@ import top.kzre.pen4j.api.PenEvent;
 import top.kzre.pen4j.api.PenListener;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
@@ -22,7 +23,7 @@ public class PenContext implements AutoCloseable {
     private final List<PenListener> listeners = new CopyOnWriteArrayList<>();
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final Executor dispatchExecutor;
-    private final Map<String, PenEvent> latestEventMap = new HashMap<>();
+    private final ConcurrentHashMap<String, PenEvent> latestEventMap = new ConcurrentHashMap<>();
     private final Object pollLock = new Object();
 
     public enum DispatchMode { DIRECT, SINGLE_THREAD }
@@ -66,9 +67,7 @@ public class PenContext implements AutoCloseable {
             driver.start(new PenListener() {
                 @Override
                 public void onPenData(PenEvent event) {
-                    synchronized (pollLock) {
-                        latestEventMap.put(event.getDevice().getUid(), event);
-                    }
+                    latestEventMap.put(event.getDevice().getUid(), event);
                     for (PenListener listener : listeners) {
                         try {
                             dispatchExecutor.execute(() -> listener.onPenData(event));
@@ -93,9 +92,7 @@ public class PenContext implements AutoCloseable {
                 @Override
                 public void onDeviceRemoved(PenDevice device) {
                     log.info("Device removed: {}", device.getName());
-                    synchronized (pollLock) {
-                        latestEventMap.remove(device.getUid());
-                    }
+                    latestEventMap.remove(device.getUid());
                     for (PenListener listener : listeners) {
                         try {
                             dispatchExecutor.execute(() -> listener.onDeviceRemoved(device));

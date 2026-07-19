@@ -15,14 +15,14 @@ import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 
 @Slf4j
-public class WindowsInkDriver implements PenPlatformDriver {
+public final class WindowsInkDriver implements PenPlatformDriver {
 
     private final HWND hwnd;
     private final AtomicReference<PenListener> listenerRef = new AtomicReference<>();
     private final List<PenDevice> devices = new ArrayList<>();
     private final WindowsInkParser parser = new WindowsInkParser();
 
-    private boolean started = false;
+    private volatile boolean started = false;
     private ComCtl32.SUBCLASSPROC subClassProc;
     private final UINT_PTR subClassId = new UINT_PTR(1L); // 修正：用 long 构造
 
@@ -56,13 +56,7 @@ public class WindowsInkDriver implements PenPlatformDriver {
         listener.onDeviceAdded(devices.get(0));
 
         // 安装子类化回调
-        subClassProc = new ComCtl32.SUBCLASSPROC() {
-            @Override
-            public LRESULT callback(HWND hWnd, int uMsg, WPARAM wParam, LPARAM lParam,
-                                    UINT_PTR uIdSubclass, ULONG_PTR dwRefData) {
-                return handleSubclassMessage(hWnd, uMsg, wParam, lParam, uIdSubclass, dwRefData);
-            }
-        };
+        subClassProc = this::handleSubclassMessage;
         // 修正：ULONG_PTR 构造参数使用 Pointer 或 long
         if (!ComCtl32.INSTANCE.SetWindowSubclass(hwnd, subClassProc, subClassId,
                 new ULONG_PTR(0L))) {
@@ -82,19 +76,26 @@ public class WindowsInkDriver implements PenPlatformDriver {
             ComCtl32.INSTANCE.RemoveWindowSubclass(hwnd, subClassProc, subClassId);
             subClassProc = null;
         }
+
         devices.clear();
         log.info("WindowsInkDriver stopped");
     }
 
     private LRESULT handleSubclassMessage(HWND hWnd, int msg, WPARAM wParam, LPARAM lParam,
                                           UINT_PTR uIdSubclass, ULONG_PTR dwRefData) {
-        switch (msg) {
-            case PointerConstants.WM_POINTERDOWN:
-            case PointerConstants.WM_POINTERUP:
-            case PointerConstants.WM_POINTERUPDATE:
-                handlePointerMessage(msg, wParam);
-                break;
+        log.info("handleSubclassMessage: hwnd={}, msg={}", hwnd, msg);
+        try{
+            switch (msg) {
+                case PointerConstants.WM_POINTERDOWN:
+                case PointerConstants.WM_POINTERUP:
+                case PointerConstants.WM_POINTERUPDATE:
+                    handlePointerMessage(msg, wParam);
+                    break;
+            }
+        }catch (Exception e){
+            log.error("handleSubclassMessage failed", e);
         }
+        log.info("Pass message to subclass window: messageId={}", msg);
         return ComCtl32.INSTANCE.DefSubclassProc(hWnd, msg, wParam, lParam);
     }
 

@@ -1,7 +1,6 @@
 package top.kzre.pen4j.windows.wintab;
 
 import top.kzre.pen4j.api.*;
-import top.kzre.pen4j.windows.common.WinConstants;
 
 final class WintabPacketParser {
 
