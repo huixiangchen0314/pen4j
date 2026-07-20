@@ -1,5 +1,6 @@
 /**
  * RIPContext.cpp - 增强版，支持设备信息查询、多按钮、序列号
+ * 修正：使用事件同步确保 Start 只在线程成功注册设备后才返回 OK
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -66,39 +67,75 @@ RIPStatus RIPContext::Start(RIPEventCallback callback) {
         strncpy_s(m_lastError, "Already started", sizeof(m_lastError));
         return RIP_ERR_ALREADY_STARTED;
     }
+
     m_callback = callback;
     m_running = true;
+
+    // 创建手动重置事件，用于线程通知初始化完成
+    m_hInitEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!m_hInitEvent) {
+        m_running = false;
+        strncpy_s(m_lastError, "CreateEvent failed", sizeof(m_lastError));
+        return RIP_ERR_UNKNOWN;
+    }
+
     m_hThread = CreateThread(nullptr, 0, ThreadProc, this, 0, nullptr);
     if (!m_hThread) {
         m_running = false;
+        CloseHandle(m_hInitEvent);
+        m_hInitEvent = nullptr;
         strncpy_s(m_lastError, "Failed to create thread", sizeof(m_lastError));
         return RIP_ERR_UNKNOWN;
     }
-    for (int i = 0; i < 200 && !m_hwnd; ++i) Sleep(10);
-    if (!m_hwnd) {
+
+    // 等待线程完成初始化（窗口创建 + 设备注册）
+    DWORD waitResult = WaitForSingleObject(m_hInitEvent, 5000);
+    CloseHandle(m_hInitEvent);
+    m_hInitEvent = nullptr;
+
+    if (waitResult != WAIT_OBJECT_0 || !m_initSuccess) {
+        // 初始化失败或超时
         m_running = false;
-        WaitForSingleObject(m_hThread, 2000);
+        // 尝试让线程退出
+        if (m_hwnd) PostMessage(m_hwnd, WM_QUIT, 0, 0);
+        WaitForSingleObject(m_hThread, INFINITE);
         CloseHandle(m_hThread);
         m_hThread = nullptr;
-        strncpy_s(m_lastError, "Message window not created", sizeof(m_lastError));
-        return RIP_ERR_WINDOW_CREATE_FAILED;
+
+        if (!m_initSuccess) {
+            strncpy_s(m_lastError, "RegisterRawInputDevices failed", sizeof(m_lastError));
+            return RIP_ERR_REGISTER_DEVICES_FAILED;
+        }
+        else {
+            strncpy_s(m_lastError, "Thread initialization timed out", sizeof(m_lastError));
+            return RIP_ERR_WINDOW_CREATE_FAILED;
+        }
     }
+
     return RIP_OK;
 }
 
 void RIPContext::Stop() {
     if (!m_running) return;
     m_running = false;
+
+    // 通知消息循环退出
     if (m_hwnd) PostMessage(m_hwnd, WM_QUIT, 0, 0);
+
+    // 等待线程结束
     if (m_hThread) {
         WaitForSingleObject(m_hThread, 5000);
         CloseHandle(m_hThread);
         m_hThread = nullptr;
     }
+
+    // 线程退出时已经销毁了窗口，这里只需取消设备注册
     UnregisterRawInputDevices();
-    if (m_hwnd) { DestroyWindow(m_hwnd); m_hwnd = nullptr; }
+    if (m_hwnd) { DestroyWindow(m_hwnd); m_hwnd = nullptr; }  // 双保险
+
     ClearDeviceCache();
     m_callback = nullptr;
+
     std::lock_guard<std::mutex> lock(m_queueMutex);
     while (!m_queue.empty()) m_queue.pop();
 }
@@ -113,15 +150,42 @@ int RIPContext::PollEvent(RIPEvent* event) {
 
 DWORD WINAPI RIPContext::ThreadProc(LPVOID param) {
     auto* self = static_cast<RIPContext*>(param);
-    if (!self->CreateMessageWindow()) return 1;
-    if (!self->RegisterRawInputDevices()) return 2;
+    self->m_initSuccess = false;
+
+    // 创建消息窗口
+    if (!self->CreateMessageWindow()) {
+        SetEvent(self->m_hInitEvent);   // 通知失败
+        return 1;
+    }
+
+    // 注册原始输入设备
+    if (!self->RegisterRawInputDevices()) {
+        SetEvent(self->m_hInitEvent);   // 通知失败
+        return 2;
+    }
+
+    // 初始化成功，通知主线程
+    self->m_initSuccess = true;
+    SetEvent(self->m_hInitEvent);
+
+    // 消息循环
     MSG msg;
-    while (self->m_running && GetMessage(&msg, nullptr, 0, 0)) {
+    while (self->m_running) {
+        BOOL bRet = GetMessage(&msg, nullptr, 0, 0);
+        if (bRet <= 0) {
+            // 0 = WM_QUIT, -1 = 错误
+            break;
+        }
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-    self->UnregisterRawInputDevices();
-    if (self->m_hwnd) { DestroyWindow(self->m_hwnd); self->m_hwnd = nullptr; }
+
+    // 线程退出时销毁自己的窗口（避免 Stop 等待时窗口还存在）
+    if (self->m_hwnd) {
+        DestroyWindow(self->m_hwnd);
+        self->m_hwnd = nullptr;
+    }
+    // 设备注销由 Stop() 统一处理，这里不再调用 UnregisterRawInputDevices
     return 0;
 }
 
@@ -166,12 +230,29 @@ bool RIPContext::CreateMessageWindow() {
 }
 
 bool RIPContext::RegisterRawInputDevices() {
-    RAWINPUTDEVICE rid;
-    rid.usUsagePage = 0x000D;
-    rid.usUsage = 0x02;
-    rid.dwFlags = RIDEV_INPUTSINK;
-    rid.hwndTarget = m_hwnd;
-    if (!::RegisterRawInputDevices(&rid, 1, sizeof(rid))) {
+    RAWINPUTDEVICE rids[3];
+    UINT nDevices = 0;
+
+    // 依次注册三种可能的笔用途
+    rids[nDevices].usUsagePage = 0x000D;
+    rids[nDevices].usUsage = 0x02;  // 笔
+    rids[nDevices].dwFlags = RIDEV_INPUTSINK;
+    rids[nDevices].hwndTarget = m_hwnd;
+    nDevices++;
+
+    rids[nDevices].usUsagePage = 0x000D;
+    rids[nDevices].usUsage = 0x01;  // 触摸屏（笔可能被报告为触摸）
+    rids[nDevices].dwFlags = RIDEV_INPUTSINK;
+    rids[nDevices].hwndTarget = m_hwnd;
+    nDevices++;
+
+    rids[nDevices].usUsagePage = 0x000D;
+    rids[nDevices].usUsage = 0x03;  // 笔（另一种）
+    rids[nDevices].dwFlags = RIDEV_INPUTSINK;
+    rids[nDevices].hwndTarget = m_hwnd;
+    nDevices++;
+
+    if (!::RegisterRawInputDevices(rids, nDevices, sizeof(RAWINPUTDEVICE))) {
         strncpy_s(m_lastError, "RegisterRawInputDevices failed", sizeof(m_lastError));
         return false;
     }
@@ -179,12 +260,28 @@ bool RIPContext::RegisterRawInputDevices() {
 }
 
 void RIPContext::UnregisterRawInputDevices() {
-    RAWINPUTDEVICE rid;
-    rid.usUsagePage = 0x000D;
-    rid.usUsage = 0x02;
-    rid.dwFlags = RIDEV_REMOVE;
-    rid.hwndTarget = nullptr;
-    ::RegisterRawInputDevices(&rid, 1, sizeof(rid));
+    RAWINPUTDEVICE rids[3];
+    UINT nDevices = 0;
+
+    rids[nDevices].usUsagePage = 0x000D;
+    rids[nDevices].usUsage = 0x02;
+    rids[nDevices].dwFlags = RIDEV_REMOVE;
+    rids[nDevices].hwndTarget = nullptr;
+    nDevices++;
+
+    rids[nDevices].usUsagePage = 0x000D;
+    rids[nDevices].usUsage = 0x01;
+    rids[nDevices].dwFlags = RIDEV_REMOVE;
+    rids[nDevices].hwndTarget = nullptr;
+    nDevices++;
+
+    rids[nDevices].usUsagePage = 0x000D;
+    rids[nDevices].usUsage = 0x03;
+    rids[nDevices].dwFlags = RIDEV_REMOVE;
+    rids[nDevices].hwndTarget = nullptr;
+    nDevices++;
+
+    ::RegisterRawInputDevices(rids, nDevices, sizeof(RAWINPUTDEVICE));
 }
 
 // ── 设备信息提取 ──

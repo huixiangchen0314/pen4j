@@ -150,6 +150,8 @@ public class RawInputDriver implements PenPlatformDriver {
     private void pollLoop() {
         RIPEvent.ByReference event = new RIPEvent.ByReference();
         while (started.get() && ripContext != null) {
+//            String error = RIPApi.INSTANCE.RIPGetLastError(ripContext);
+//            log.error("rip error: {}", error);
             int got = RIPApi.INSTANCE.RIPPollEvent(ripContext, event);
             if (got == 1) {
                 PenListener listener = listenerRef.get();

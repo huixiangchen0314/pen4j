@@ -1,6 +1,9 @@
 #pragma once
 /**
- * RIPApi.h - Raw Input Pen 胶水层公开接口（PascalCase + RIP 前缀）
+ * RIPApi.h - Raw Input Pen 胶水层公开接口
+ * 1. 多设备管理
+ * 2. 设备发现事件
+ * 3. 轮询优于通知
  */
 #ifndef RIP_API_H
 #define RIP_API_H

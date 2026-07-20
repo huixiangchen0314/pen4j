@@ -49,6 +49,9 @@ private:
     RIPContext(const RIPContext&) = delete;
     RIPContext& operator=(const RIPContext&) = delete;
 
+    HANDLE m_hInitEvent = nullptr;
+    bool m_initSuccess = false;
+
     static DWORD WINAPI ThreadProc(LPVOID param);
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -96,6 +99,7 @@ private:
     LONG m_logicalMinX = 0, m_logicalMaxX = 65535;
     LONG m_logicalMinY = 0, m_logicalMaxY = 65535;
     LONG m_logicalMinPressure = 0, m_logicalMaxPressure = 1023;
+
 
     // 设备标识
     std::string m_deviceName;
