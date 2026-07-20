@@ -10,16 +10,11 @@ public interface WTPApi extends Library {
 
     Pointer WTPCreate();
     void WTPDestroy(Pointer ctx);
-    int WTPStart(Pointer ctx, WTPEventCallback callback);  // 使用回调接口
+    int WTPStart(Pointer ctx);                          // 无回调参数
     void WTPStop(Pointer ctx);
-    int WTPPollEvent(Pointer ctx, WTPEvent event);
+    int WTPPollEventEx(Pointer ctx, WTPExtendedEvent event); // 新轮询接口
     String WTPGetLastError(Pointer ctx);
 
-    int WTPGetPressureRange(Pointer ctx, IntByReference min, IntByReference max);
-    int WTPGetLogicalRange(Pointer ctx, IntByReference maxX, IntByReference maxY);
-    int WTPGetButtonCount(Pointer ctx, IntByReference count);
-    String WTPGetDeviceName(Pointer ctx);
-    int WTPGetDeviceVid(Pointer ctx, IntByReference vid);
-    int WTPGetDevicePid(Pointer ctx, IntByReference pid);
-    String WTPGetDeviceUid(Pointer ctx);
+    int WTPGetDeviceCount(Pointer ctx, IntByReference count);
+    int WTPGetDeviceInfo(Pointer ctx, int index, WTPDeviceInfo info);
 }

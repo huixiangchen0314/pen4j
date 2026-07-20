@@ -1,8 +1,7 @@
-/**
- * WTPApi.h - WinTab Pen 胶水层公开接口
- */
 #pragma once
-
+/**
+ * WTPApi.h - WinTab Pen 胶水层公开接口（多设备，无内部缓存）
+ */
 #ifndef WTP_API_H
 #define WTP_API_H
 
@@ -18,13 +17,13 @@ extern "C" {
 
 #include <stdint.h>
 
-    /* 前置声明为 C++ class，消除类型不一致警告 */
 #ifdef __cplusplus
     class WTPContext;
 #else
     typedef struct WTPContext WTPContext;
 #endif
 
+    /* 笔事件数据（内部使用，不直接暴露） */
     typedef struct {
         uint32_t timestamp;
         float    x, y;
@@ -42,7 +41,24 @@ extern "C" {
         uint16_t buttons;
     } WTPEvent;
 
-    typedef void (*WTPEventCallback)(const WTPEvent* event);
+    /* 设备信息（枚举时返回） */
+    typedef struct {
+        char     deviceName[128];
+        char     uid[256];
+        uint16_t vid;
+        uint16_t pid;
+        uint32_t maxPressure;
+        uint32_t maxLogicalX;
+        uint32_t maxLogicalY;
+        uint32_t buttonCount;
+        uint32_t reserved;
+    } WTPDeviceInfo;
+
+    /* 扩展笔事件（携带设备 UID） */
+    typedef struct {
+        char     deviceUid[256];
+        WTPEvent event;
+    } WTPExtendedEvent;
 
     typedef enum {
         WTP_OK = 0,
@@ -51,23 +67,24 @@ extern "C" {
         WTP_ERR_UNKNOWN
     } WTPStatus;
 
+    /* ── 上下文生命周期 ── */
     WTPAPI WTPContext* WTPCreate(void);
-    WTPAPI void WTPDestroy(WTPContext* ctx);
-    WTPAPI WTPStatus WTPStart(WTPContext* ctx, WTPEventCallback callback);
-    WTPAPI void WTPStop(WTPContext* ctx);
-    WTPAPI int WTPPollEvent(WTPContext* ctx, WTPEvent* event);
-    WTPAPI const char* WTPGetLastError(WTPContext* ctx);
+    WTPAPI void        WTPDestroy(WTPContext* ctx);
+    WTPAPI WTPStatus   WTPStart(WTPContext* ctx);   /* 无回调，仅轮询模式 */
+    WTPAPI void        WTPStop(WTPContext* ctx);
 
-    WTPAPI WTPStatus WTPGetPressureRange(WTPContext* ctx, uint32_t* min, uint32_t* max);
-    WTPAPI WTPStatus WTPGetLogicalRange(WTPContext* ctx, uint32_t* maxX, uint32_t* maxY);
-    WTPAPI WTPStatus WTPGetButtonCount(WTPContext* ctx, uint32_t* count);
-    WTPAPI const char* WTPGetDeviceName(WTPContext* ctx);
-    WTPAPI WTPStatus WTPGetDeviceVid(WTPContext* ctx, uint16_t* vid);
-    WTPAPI WTPStatus WTPGetDevicePid(WTPContext* ctx, uint16_t* pid);
-    WTPAPI const char* WTPGetDeviceUid(WTPContext* ctx);
+    /* ── 事件轮询（多设备） ── */
+    WTPAPI int WTPPollEventEx(WTPContext* ctx, WTPExtendedEvent* event);
+
+    /* ── 设备实时枚举 ── */
+    WTPAPI WTPStatus WTPGetDeviceCount(WTPContext* ctx, uint32_t* count);
+    WTPAPI WTPStatus WTPGetDeviceInfo(WTPContext* ctx, uint32_t index, WTPDeviceInfo* info);
+
+    /* ── 错误信息 ── */
+    WTPAPI const char* WTPGetLastError(WTPContext* ctx);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif
+#endif /* WTP_API_H */

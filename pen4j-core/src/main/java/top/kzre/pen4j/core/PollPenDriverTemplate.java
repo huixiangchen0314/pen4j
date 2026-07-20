@@ -2,21 +2,11 @@ package top.kzre.pen4j.core;
 
 import lombok.extern.slf4j.Slf4j;
 import top.kzre.pen4j.api.*;
+
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/**
- * 轮询式笔驱动模板，实现 {@link PenPlatformDriver}。
- * <p>
- * 构造时注入一个 {@link PollPenDriver} 实现，负责：
- * <ol>
- *   <li>向全局 {@link SmartTaskLoop} 注册设备探测和事件轮询任务</li>
- *   <li>维护设备 UID → {@link PenDevice} 映射</li>
- *   <li>调用 {@link PenListener} 通知设备增删和笔数据</li>
- * </ol>
- * 该模板为 final，确保所有平台驱动的生命周期管理完全一致。
- */
 @Slf4j
 public final class PollPenDriverTemplate implements PenPlatformDriver {
 
@@ -32,9 +22,9 @@ public final class PollPenDriverTemplate implements PenPlatformDriver {
     private final Runnable probeTask = this::probeDevices;
     private final Runnable pollTask  = this::pollAndDispatch;
 
-    /**
-     * @param driver 具体平台驱动实例（已创建，未启动）
-     */
+    // JVM 关闭钩子
+    private final Thread shutdownHook = new Thread(this::onShutdown, "PenDriverShutdownHook");
+
     public PollPenDriverTemplate(PollPenDriver driver) {
         this.driver = Objects.requireNonNull(driver, "driver must not be null");
     }
@@ -59,7 +49,6 @@ public final class PollPenDriverTemplate implements PenPlatformDriver {
         }
         this.listener = listener;
 
-        // 1. 平台驱动自身的初始化
         try {
             log.info("Starting platform driver...");
             driver.onStart();
@@ -70,28 +59,46 @@ public final class PollPenDriverTemplate implements PenPlatformDriver {
             throw new RuntimeException("driver.onStart failed", e);
         }
 
-        // 2. 立即执行一次设备枚举，填充初始列表
+        // 立即执行一次设备枚举
         probeDevices();
 
-        // 3. 向全局循环注册任务（若循环未运行会自动启动）
+        // 注册全局任务
         TaskLoops.deviceProbe().register(probeTask);
         TaskLoops.eventPoll().register(pollTask);
         log.info("Registered probe and poll tasks to global loops");
+
+        // 注册 JVM 关闭钩子
+        try {
+            Runtime.getRuntime().addShutdownHook(shutdownHook);
+            log.debug("Registered shutdown hook");
+        } catch (IllegalStateException e) {
+            // JVM 已经在关闭过程中，无法注册钩子
+            log.warn("Could not register shutdown hook, JVM may be shutting down", e);
+        }
     }
 
     @Override
     public void stop() {
         if (!started.compareAndSet(true, false)) {
-            return; // 已经停止
+            return; // 已停止或未启动
         }
 
         log.info("Stopping platform driver...");
-        // 1. 先停止事件轮询（避免后续空指针）
+
+        // 1. 移除 JVM 关闭钩子（防止重复调用）
+        try {
+            Runtime.getRuntime().removeShutdownHook(shutdownHook);
+            log.debug("Removed shutdown hook");
+        } catch (IllegalStateException e) {
+            // JVM 在关闭时可能无法移除，忽略
+        }
+
+        // 2. 停止事件轮询任务
         TaskLoops.eventPoll().unregister(pollTask);
-        // 2. 停止设备探测
+        // 3. 停止设备探测任务
         TaskLoops.deviceProbe().unregister(probeTask);
 
-        // 3. 停止平台驱动
+        // 4. 停止平台驱动
         try {
             driver.onStop();
             log.info("Platform driver stopped successfully");
@@ -99,18 +106,20 @@ public final class PollPenDriverTemplate implements PenPlatformDriver {
             log.error("Error stopping platform driver", e);
         }
 
-        // 4. 清理资源
+        // 5. 清理资源
         listener = null;
         devices.clear();
         uidToDevice.clear();
     }
 
-    // ── 设备探测逻辑（由探测线程和主动调用触发） ──
+    // ── JVM 关闭钩子回调 ──
+    private void onShutdown() {
+        log.info("Shutdown hook triggered, stopping driver...");
+        stop(); // stop() 是幂等的，多次调用无害
+    }
 
-    /**
-     * 调用驱动的 {@link PollPenDriver#enumerateDevices()} 获取最新设备列表，
-     * 与内部映射比较，触发设备增删回调。
-     */
+    // ── 设备探测逻辑 ──
+
     private void probeDevices() {
         if (!started.get()) return;
         try {
@@ -122,9 +131,8 @@ public final class PollPenDriverTemplate implements PenPlatformDriver {
                 String uid = dev.getUid();
                 if (uid == null || uid.isEmpty()) continue;
                 if (uidToDevice.containsKey(uid)) {
-                    existingUids.remove(uid);   // 设备仍然存在
+                    existingUids.remove(uid);
                 } else {
-                    // 新设备
                     uidToDevice.put(uid, dev);
                     devices.add(dev);
                     log.info("Device added: {} (UID: {})", dev.getName(), uid);
@@ -134,7 +142,6 @@ public final class PollPenDriverTemplate implements PenPlatformDriver {
                 }
             }
 
-            // 移除已消失的设备
             for (String oldUid : existingUids) {
                 PenDevice removed = uidToDevice.remove(oldUid);
                 if (removed != null) {
@@ -151,12 +158,8 @@ public final class PollPenDriverTemplate implements PenPlatformDriver {
         }
     }
 
-    // ── 事件轮询及分发逻辑（由轮询线程调用） ──
+    // ── 事件轮询及分发逻辑 ──
 
-    /**
-     * 从驱动拉取一个笔事件，根据设备 UID 找到对应设备对象，
-     * 并通过监听器分发给上层。若设备未知，立即触发一次同步探测。
-     */
     private void pollAndDispatch() {
         if (!started.get()) return;
         try {
@@ -167,7 +170,6 @@ public final class PollPenDriverTemplate implements PenPlatformDriver {
             PenDevice device = uidToDevice.get(uid);
             if (device == null) {
                 log.debug("Received event from unknown device UID: {}. Triggering immediate probe.", uid);
-                // 未知设备 → 立刻触发一次探测（同步，保证设备发现）
                 probeDevices();
                 device = uidToDevice.get(uid);
                 if (device == null) {
@@ -176,7 +178,6 @@ public final class PollPenDriverTemplate implements PenPlatformDriver {
                 }
             }
 
-            // 确保事件携带正确的设备对象（防御性拷贝）
             if (event.getDevice() != device) {
                 event = new DefaultPenEvent(device, event.getTimestampMicros(), event.getState());
             }

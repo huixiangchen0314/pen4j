@@ -8,6 +8,7 @@ import top.kzre.pen4j.core.PenContext;
 import top.kzre.pen4j.core.PenPlatformDriver;
 import top.kzre.pen4j.core.PollPenDriverTemplate;
 import top.kzre.pen4j.windows.rawinput.RawInputDriver;
+import top.kzre.pen4j.windows.wintab.WinTabDriver;
 
 import static com.sun.jna.platform.win32.WinUser.*;
 
@@ -38,7 +39,7 @@ public class PenConsole {
 
         // 2. 用窗口句柄构造 Wintab 驱动
         long hwndVal = Pointer.nativeValue(hwnd.getPointer());
-        PenPlatformDriver driver = new PollPenDriverTemplate(new RawInputDriver());
+        PenPlatformDriver driver = new PollPenDriverTemplate(new WinTabDriver());
 
         // 3. 创建 PenContext（传入驱动实例）
         try (PenContext ctx = PenContext.create(driver)) {
@@ -51,15 +52,6 @@ public class PenConsole {
                     log.info("Pen state: {}, device: {}", s, dev);
                 }
 
-                @Override
-                public void onDeviceAdded(PenDevice device) {
-                    System.out.println("Device added: " + device.getName());
-                }
-
-                @Override
-                public void onDeviceRemoved(PenDevice device) {
-                    System.out.println("Device removed: " + device.getName());
-                }
             });
 
             ctx.start();

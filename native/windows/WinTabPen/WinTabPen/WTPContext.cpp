@@ -27,47 +27,6 @@ static int ExtractVidFromPnpId(const std::wstring& pnpId) {
     return 0;
 }
 
-// ── 导出包装 ──
-WTPContext* WTPCreate(void) { return new (std::nothrow) WTPContext(); }
-void WTPDestroy(WTPContext* ctx) { if (ctx) { ctx->Stop(); delete ctx; } }
-WTPStatus WTPStart(WTPContext* ctx, WTPEventCallback cb) { return ctx ? ctx->Start(cb) : WTP_ERR_UNKNOWN; }
-void WTPStop(WTPContext* ctx) { if (ctx) ctx->Stop(); }
-int WTPPollEvent(WTPContext* ctx, WTPEvent* ev) { return ctx ? ctx->PollEvent(ev) : 0; }
-const char* WTPGetLastError(WTPContext* ctx) { return ctx ? ctx->GetLastError() : "Invalid context"; }
-
-WTPStatus WTPGetPressureRange(WTPContext* ctx, uint32_t* min, uint32_t* max) {
-    if (!ctx || !min || !max) return WTP_ERR_UNKNOWN;
-    ctx->GetPressureRange(*min, *max);
-    return WTP_OK;
-}
-
-WTPStatus WTPGetLogicalRange(WTPContext* ctx, uint32_t* maxX, uint32_t* maxY) {
-    if (!ctx || !maxX || !maxY) return WTP_ERR_UNKNOWN;
-    ctx->GetLogicalRange(*maxX, *maxY);
-    return WTP_OK;
-}
-
-WTPStatus WTPGetButtonCount(WTPContext* ctx, uint32_t* count) {
-    if (!ctx || !count) return WTP_ERR_UNKNOWN;
-    *count = ctx->GetButtonCount();
-    return WTP_OK;
-}
-
-const char* WTPGetDeviceName(WTPContext* ctx) { return ctx ? ctx->GetDeviceName() : ""; }
-
-WTPStatus WTPGetDeviceVid(WTPContext* ctx, uint16_t* vid) {
-    if (!ctx || !vid) return WTP_ERR_UNKNOWN;
-    *vid = ctx->GetDeviceVid();
-    return WTP_OK;
-}
-
-WTPStatus WTPGetDevicePid(WTPContext* ctx, uint16_t* pid) {
-    if (!ctx || !pid) return WTP_ERR_UNKNOWN;
-    *pid = ctx->GetDevicePid();
-    return WTP_OK;
-}
-
-const char* WTPGetDeviceUid(WTPContext* ctx) { return ctx ? ctx->GetDeviceUid() : ""; }
 
 // ── WTPContext 实现 ──
 WTPContext::WTPContext() {
@@ -113,7 +72,7 @@ void WTPContext::FreeWinTabFunctions() {
     pWTPacketsGet = nullptr;
 }
 
-WTPStatus WTPContext::Start(WTPEventCallback callback) {
+WTPStatus WTPContext::Start() {
     if (m_running) {
         strncpy_s(m_lastError, "Already started", sizeof(m_lastError));
         return WTP_ERR_ALREADY_STARTED;
@@ -122,11 +81,10 @@ WTPStatus WTPContext::Start(WTPEventCallback callback) {
         strncpy_s(m_lastError, "WinTab functions not loaded", sizeof(m_lastError));
         return WTP_ERR_CREATE_CONTEXT;
     }
-    m_callback = callback;
     if (!CreateContext()) {
-        strncpy_s(m_lastError, "Failed to create WinTab context", sizeof(m_lastError));
         return WTP_ERR_CREATE_CONTEXT;
     }
+    QueryCurrentDeviceInfo();   // 填充当前设备 UID 等信息
     m_running = true;
     m_hThread = CreateThread(nullptr, 0, ThreadProc, this, 0, nullptr);
     if (!m_hThread) {
@@ -149,12 +107,11 @@ void WTPContext::Stop() {
         m_hThread = nullptr;
     }
     DestroyContext();
-    m_callback = nullptr;
     std::lock_guard<std::mutex> lock(m_queueMutex);
     while (!m_queue.empty()) m_queue.pop();
 }
 
-int WTPContext::PollEvent(WTPEvent* event) {
+int WTPContext::PollEventEx(WTPExtendedEvent* event) {
     std::lock_guard<std::mutex> lock(m_queueMutex);
     if (m_queue.empty()) return 0;
     *event = m_queue.front();
@@ -162,12 +119,31 @@ int WTPContext::PollEvent(WTPEvent* event) {
     return 1;
 }
 
-void WTPContext::GetPressureRange(uint32_t& outMin, uint32_t& outMax) const {
-    outMin = m_pressureMin; outMax = m_pressureMax;
-}
+void WTPContext::QueryCurrentDeviceInfo() {
+    if (!pWTInfoW) return;
 
-void WTPContext::GetLogicalRange(uint32_t& outMaxX, uint32_t& outMaxY) const {
-    outMaxX = m_maxX; outMaxY = m_maxY;
+    WCHAR nameBuf[256] = { 0 };
+    pWTInfoW(WTI_DEVICES + m_lc.lcDevice, DVC_NAME, nameBuf);
+    m_currentDeviceName = WcharToUtf8(nameBuf);
+    if (m_currentDeviceName.empty()) m_currentDeviceName = "WinTab Pen";
+
+    AXIS pressureAxis;
+    if (pWTInfoW(WTI_DEVICES + m_lc.lcDevice, DVC_NPRESSURE, &pressureAxis)) {
+        m_currentMaxPressure = pressureAxis.axMax;
+    }
+
+    m_currentMaxX = m_lc.lcOutExtX ? m_lc.lcOutExtX : 65535;
+    m_currentMaxY = m_lc.lcOutExtY ? m_lc.lcOutExtY : 65535;
+
+    BYTE btnCount = 0;
+    pWTInfoW(WTI_CURSORS + 0, CSR_BUTTONS, &btnCount);
+    m_currentButtonCount = max(btnCount, 0);
+
+    WCHAR pnpBuf[256] = { 0 };
+    if (pWTInfoW(WTI_DEVICES + m_lc.lcDevice, DVC_PNPID, pnpBuf)) {
+        m_currentVid = ExtractVidFromPnpId(pnpBuf);
+    }
+    m_currentDeviceUid = m_currentDeviceName + "-" + std::to_string(m_currentVid);
 }
 
 DWORD WINAPI WTPContext::ThreadProc(LPVOID param) {
@@ -180,10 +156,14 @@ DWORD WINAPI WTPContext::ThreadProc(LPVOID param) {
         int count = self->pWTPacketsGet(self->m_hCtx, self->m_queueSize, buffer.data());
         if (count <= 0) { Sleep(1); continue; }
         for (int i = 0; i < count; ++i) {
-            WTPEvent event;
-            self->ExtractPacket(buffer.data() + i * self->m_packetSize, event);
-            if (self->m_callback) self->m_callback(&event);
-            self->PushEvent(event);
+            WTPEvent rawEvent;
+            self->ExtractPacket(buffer.data() + i * self->m_packetSize, rawEvent);
+
+            WTPExtendedEvent extEvent;
+            strncpy_s(extEvent.deviceUid, self->m_currentDeviceUid.c_str(), sizeof(extEvent.deviceUid) - 1);
+            extEvent.deviceUid[sizeof(extEvent.deviceUid) - 1] = '\0';
+            extEvent.event = rawEvent;
+            self->PushEvent(extEvent);
         }
     }
     return 0;
@@ -220,7 +200,7 @@ bool WTPContext::CreateContext() {
         return false;
     }
 
-    // 计算包大小
+    // 计算包大小（与之前相同）
     m_packetSize = 0;
     if (m_pktDataMask & PK_CONTEXT)         m_packetSize += sizeof(HCTX);
     if (m_pktDataMask & PK_STATUS)          m_packetSize += sizeof(UINT);
@@ -237,42 +217,6 @@ bool WTPContext::CreateContext() {
     if (m_pktDataMask & PK_ORIENTATION)    m_packetSize += sizeof(ORIENTATION);
     if (m_pktDataMask & PK_ROTATION)       m_packetSize += sizeof(ROTATION);
 
-    // 查询设备信息
-    WCHAR nameBuf[256] = { 0 };
-    pWTInfoW(WTI_DEVICES + m_lc.lcDevice, DVC_NAME, nameBuf);
-    m_deviceName = WcharToUtf8(nameBuf);
-    if (m_deviceName.empty()) m_deviceName = "WinTab Pen";
-
-    AXIS pressureAxis;
-    if (pWTInfoW(WTI_DEVICES + m_lc.lcDevice, DVC_NPRESSURE, &pressureAxis)) {
-        m_pressureMin = pressureAxis.axMin;
-        m_pressureMax = pressureAxis.axMax;
-    }
-
-    m_maxX = m_lc.lcOutExtX ? m_lc.lcOutExtX : 65535;
-    m_maxY = m_lc.lcOutExtY ? m_lc.lcOutExtY : 65535;
-
-    BYTE btnCount = 0;
-    pWTInfoW(WTI_CURSORS + 0, CSR_BUTTONS, &btnCount);
-    m_buttonCount = max(btnCount, 0);
-
-    WCHAR pnpBuf[256] = { 0 };
-    if (pWTInfoW(WTI_DEVICES + m_lc.lcDevice, DVC_PNPID, pnpBuf)) {
-        m_devicePath = pnpBuf;
-        m_vid = ExtractVidFromPnpId(m_devicePath);
-        m_pid = 0;
-    }
-
-    AXIS orientAxis[3];
-    if (pWTInfoW(WTI_DEVICES + m_lc.lcDevice, DVC_ORIENTATION, orientAxis)) {
-        for (int i = 0; i < 3; ++i) m_orientMax[i] = orientAxis[i].axMax;
-    }
-    AXIS rotAxis[3];
-    if (pWTInfoW(WTI_DEVICES + m_lc.lcDevice, DVC_ROTATION, rotAxis)) {
-        for (int i = 0; i < 3; ++i) m_rotationMax[i] = rotAxis[i].axMax;
-    }
-
-    m_uid = m_deviceName + "-" + std::to_string(m_vid);
     return true;
 }
 
@@ -286,30 +230,25 @@ void WTPContext::ExtractPacket(const BYTE* raw, WTPEvent& out) {
     DWORD mask = m_pktDataMask;
 
     if (mask & PK_CONTEXT)         ptr += sizeof(HCTX);
-
     if (mask & PK_STATUS) {
         UINT status = *(UINT*)ptr;
         out.proximity = (status & TPS_PROXIMITY) ? 1 : 0;
         out.eraser = (status & TPS_INVERT) ? 1 : 0;
         ptr += sizeof(UINT);
     }
-
     if (mask & PK_TIME) { out.timestamp = *(DWORD*)ptr; ptr += sizeof(DWORD); }
     if (mask & PK_CHANGED)         ptr += sizeof(WTPKT);
     if (mask & PK_SERIAL_NUMBER)   ptr += sizeof(UINT);
     if (mask & PK_CURSOR)          ptr += sizeof(UINT);
-
     if (mask & PK_BUTTONS) {
         DWORD btns = *(DWORD*)ptr;
         out.buttons = (uint16_t)(btns & 0xFFFF);
         out.tip = (btns & 0x01) ? 1 : 0;
         ptr += sizeof(DWORD);
     }
-
     if (mask & PK_X) { out.x = (float)*(LONG*)ptr; ptr += sizeof(LONG); }
     if (mask & PK_Y) { out.y = (float)*(LONG*)ptr; ptr += sizeof(LONG); }
     if (mask & PK_Z)               ptr += sizeof(LONG);
-
     if (mask & PK_NORMAL_PRESSURE) { out.pressure = (float)*(UINT*)ptr; ptr += sizeof(UINT); }
     if (mask & PK_TANGENT_PRESSURE) { out.tangentialPressure = (float)*(UINT*)ptr; ptr += sizeof(UINT); }
 
@@ -317,11 +256,9 @@ void WTPContext::ExtractPacket(const BYTE* raw, WTPEvent& out) {
         ORIENTATION* ori = (ORIENTATION*)ptr;
         int azimuth = ori->orAzimuth;
         int altitude = ori->orAltitude;
-        int twist = ori->orTwist;
-
         out.azimuth = azimuth / 10.0f;
         out.altitude = altitude / 10.0f;
-        out.twist = twist / 10.0f;
+        out.twist = ori->orTwist / 10.0f;
 
         if (altitude >= 0) {
             double altMax = (double)m_orientMax[1];
@@ -354,8 +291,59 @@ void WTPContext::ExtractPacket(const BYTE* raw, WTPEvent& out) {
     }
 }
 
-void WTPContext::PushEvent(const WTPEvent& ev) {
+void WTPContext::PushEvent(const WTPExtendedEvent& ev) {
     std::lock_guard<std::mutex> lock(m_queueMutex);
     if (m_queue.size() >= MAX_WTP_EVENT_QUEUE) m_queue.pop();
     m_queue.push(ev);
+}
+
+// ── 实时枚举实现 ──
+WTPStatus WTPContext::GetDeviceCount(uint32_t* count) {
+    *count = 0;
+    if (!pWTInfoW) return WTP_ERR_UNKNOWN;
+
+    UINT nDevices = 0;
+    if (pWTInfoW(WTI_INTERFACE, IFC_NDEVICES, &nDevices) == 0) return WTP_ERR_UNKNOWN;
+    *count = nDevices;
+    return WTP_OK;
+}
+
+WTPStatus WTPContext::GetDeviceInfo(uint32_t index, WTPDeviceInfo* info) {
+    if (!pWTInfoW || !info) return WTP_ERR_UNKNOWN;
+
+    UINT nDevices = 0;
+    if (pWTInfoW(WTI_INTERFACE, IFC_NDEVICES, &nDevices) == 0) return WTP_ERR_UNKNOWN;
+    if (index >= nDevices) return WTP_ERR_UNKNOWN;
+
+    memset(info, 0, sizeof(WTPDeviceInfo));
+
+    WCHAR nameBuf[256] = { 0 };
+    pWTInfoW(WTI_DEVICES + index, DVC_NAME, nameBuf);
+    std::string name = WcharToUtf8(nameBuf);
+    if (name.empty()) name = "WinTab Pen " + std::to_string(index);
+    strncpy_s(info->deviceName, name.c_str(), sizeof(info->deviceName) - 1);
+
+    AXIS pressureAxis;
+    if (pWTInfoW(WTI_DEVICES + index, DVC_NPRESSURE, &pressureAxis)) {
+        info->maxPressure = pressureAxis.axMax;
+    }
+
+    // 逻辑范围（输出范围默认桌面大小）
+    info->maxLogicalX = GetSystemMetrics(SM_CXSCREEN);
+    info->maxLogicalY = GetSystemMetrics(SM_CYSCREEN);
+
+    BYTE btnCount = 0;
+    pWTInfoW(WTI_CURSORS + 0, CSR_BUTTONS, &btnCount);
+    info->buttonCount = max(btnCount, 0);
+
+    WCHAR pnpBuf[256] = { 0 };
+    if (pWTInfoW(WTI_DEVICES + index, DVC_PNPID, pnpBuf)) {
+        info->vid = ExtractVidFromPnpId(pnpBuf);
+    }
+
+    // 生成 UID
+    std::string uid = name + "-" + std::to_string(info->vid);
+    strncpy_s(info->uid, uid.c_str(), sizeof(info->uid) - 1);
+
+    return WTP_OK;
 }

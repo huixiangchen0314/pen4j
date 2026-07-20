@@ -6,22 +6,18 @@ import lombok.extern.slf4j.Slf4j;
 import top.kzre.pen4j.api.*;
 import top.kzre.pen4j.core.BasePenDevice;
 import top.kzre.pen4j.core.DefaultPenEvent;
-import top.kzre.pen4j.core.PenPlatformDriver;
+import top.kzre.pen4j.core.PollPenDriver;
 import top.kzre.pen4j.windows.common.PenVendorVIDTable;
 
 import java.util.*;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
-public class WinTabDriver implements PenPlatformDriver {
-
-    private final List<WinTabDevice> devices = new ArrayList<>();
-    private final AtomicReference<PenListener> listenerRef = new AtomicReference<>();
+public class WinTabDriver extends PollPenDriver {
 
     private volatile Pointer wtpContext;
-    private final AtomicBoolean started = new AtomicBoolean(false);
-    private Thread pollThread;
+    // UID -> 设备对象缓存
+    private final Map<String, PenDevice> uidToDeviceCache = new ConcurrentHashMap<>();
 
     @Override
     public boolean isAvailable() {
@@ -32,156 +28,143 @@ public class WinTabDriver implements PenPlatformDriver {
     }
 
     @Override
-    public List<PenDevice> getDevices() {
-        return Collections.unmodifiableList(new ArrayList<>(devices));
-    }
-
-    @Override
-    public void start(PenListener listener) {
-        if (started.getAndSet(true)) {
-            log.warn("WinTabDriver already started");
-            return;
-        }
-        Objects.requireNonNull(listener);
-        listenerRef.set(listener);
-
+    public void onStart() {
+        log.debug("Creating WTP context...");
         wtpContext = WTPApi.INSTANCE.WTPCreate();
         if (wtpContext == null) {
             throw new RuntimeException("WTPCreate failed");
         }
-
-        int status = WTPApi.INSTANCE.WTPStart(wtpContext, null);
+        int status = WTPApi.INSTANCE.WTPStart(wtpContext);
         if (status != 0) {
             String err = WTPApi.INSTANCE.WTPGetLastError(wtpContext);
             WTPApi.INSTANCE.WTPDestroy(wtpContext);
             wtpContext = null;
             throw new RuntimeException("WTPStart failed: " + err);
         }
-
-        WinTabDevice device = buildDeviceFromGlue();
-        devices.add(device);
-        listener.onDeviceAdded(device);
-
-        pollThread = new Thread(this::pollLoop, "WinTab-Poll");
-        pollThread.setDaemon(true);
-        pollThread.start();
-
-        log.info("WinTabDriver started (pure glue)");
+        log.info("WinTabDriver started successfully");
     }
 
     @Override
-    public void stop() {
-        if (!started.getAndSet(false)) return;
-
-        if (pollThread != null) {
-            pollThread.interrupt();
-            try { pollThread.join(2000); } catch (InterruptedException ignored) {}
-            pollThread = null;
-        }
-
+    public void onStop() {
         if (wtpContext != null) {
             WTPApi.INSTANCE.WTPStop(wtpContext);
             WTPApi.INSTANCE.WTPDestroy(wtpContext);
             wtpContext = null;
         }
-
-        devices.clear();
-        listenerRef.set(null);
+        uidToDeviceCache.clear();
         log.info("WinTabDriver stopped");
     }
 
-    private WinTabDevice buildDeviceFromGlue() {
-        WinTabDevice device = new WinTabDevice();
+    @Override
+    public List<PenDevice> enumerateDevices() {
+        log.debug("Enumerating WinTab devices...");
+        List<PenDevice> devices = new ArrayList<>();
+        if (wtpContext == null) return devices;
 
-        IntByReference min = new IntByReference();
-        IntByReference max = new IntByReference();
-        if (WTPApi.INSTANCE.WTPGetPressureRange(wtpContext, min, max) == 0) {
-            device.setMaxPressure(max.getValue());
+        IntByReference countRef = new IntByReference();
+        int ret = WTPApi.INSTANCE.WTPGetDeviceCount(wtpContext, countRef);
+        if (ret != 0) {
+            log.error("Failed to get device count: {}", WTPApi.INSTANCE.WTPGetLastError(wtpContext));
+            return devices;
         }
+        int count = countRef.getValue();
+        log.info("Found {} WinTab device(s)", count);
 
-        IntByReference maxX = new IntByReference();
-        IntByReference maxY = new IntByReference();
-        if (WTPApi.INSTANCE.WTPGetLogicalRange(wtpContext, maxX, maxY) == 0) {
-            device.setMaxX(maxX.getValue());
-            device.setMaxY(maxY.getValue());
-        }
-
-        IntByReference btnCount = new IntByReference();
-        if (WTPApi.INSTANCE.WTPGetButtonCount(wtpContext, btnCount) == 0) {
-            device.setSideButtonCount(btnCount.getValue());
-        }
-
-        String name = WTPApi.INSTANCE.WTPGetDeviceName(wtpContext);
-        if (name != null && !name.isEmpty()) {
-            device.setName(name);
-        }
-
-        IntByReference vidRef = new IntByReference();
-        IntByReference pidRef = new IntByReference();
-        if (WTPApi.INSTANCE.WTPGetDeviceVid(wtpContext, vidRef) == 0) {
-            int vid = vidRef.getValue();
-            device.setVid(vid);
-            device.setVendor(PenVendorVIDTable.getVendorName(vid));
-        }
-        if (WTPApi.INSTANCE.WTPGetDevicePid(wtpContext, pidRef) == 0) {
-            device.setPid(pidRef.getValue());
-        }
-
-        String uid = WTPApi.INSTANCE.WTPGetDeviceUid(wtpContext);
-        if (uid != null && !uid.isEmpty()) {
-            device.setUid(uid);
-        }
-
-        return device;
-    }
-
-    private void pollLoop() {
-        WTPEvent.ByReference event = new WTPEvent.ByReference();
-        while (started.get() && wtpContext != null) {
-            int got = WTPApi.INSTANCE.WTPPollEvent(wtpContext, event);
-            if (got == 1) {
-                PenListener listener = listenerRef.get();
-                if (listener == null) continue;
-
-                WinTabDevice device = devices.isEmpty() ? null : devices.get(0);
-                if (device == null) continue;
-
-                int buttonsMask = event.buttons & 0xFFFF;
-                PenState state = PenState.builder()
-                        .x(event.x)
-                        .y(event.y)
-                        .pressure(event.pressure)
-                        .tangentialPressure(event.tangentialPressure)
-                        .tiltX(event.tiltX)
-                        .tiltY(event.tiltY)
-                        .azimuth(event.azimuth)
-                        .altitude(event.altitude)
-                        .twist(event.twist)
-                        .roll(event.roll)
-                        .pitch(event.pitch)
-                        .yaw(event.yaw)
-                        .near(event.proximity != 0)
-                        .tipPressed(event.tip != 0)
-                        .eraserPressed(event.eraser != 0)
-                        .buttons(buttonsMask)
-                        .cursorType(event.eraser != 0 ? PenCursorType.ERASER : PenCursorType.PEN)
-                        .build();
-
-                PenEvent penEvent = new DefaultPenEvent(device, System.currentTimeMillis() * 1000, state);
-                listener.onPenData(penEvent);
-            } else {
-                try { Thread.sleep(1); } catch (InterruptedException e) { break; }
+        for (int i = 0; i < count; i++) {
+            WTPDeviceInfo info = new WTPDeviceInfo();
+            ret = WTPApi.INSTANCE.WTPGetDeviceInfo(wtpContext, i, info);
+            if (ret != 0) {
+                log.warn("Failed to get device info for index {}: {}", i, WTPApi.INSTANCE.WTPGetLastError(wtpContext));
+                continue;
             }
+            String uid = info.getUid();
+            WinTabDevice device = (WinTabDevice) uidToDeviceCache.get(uid);
+            if (device == null) {
+                device = new WinTabDevice();
+                device.setUid(uid);
+                device.setName(info.getDeviceName());
+                device.setVid(info.vid & 0xFFFF);
+                device.setPid(info.pid & 0xFFFF);
+                device.setVendor(PenVendorVIDTable.getVendorName(device.getVid()));
+                device.setMaxPressure(info.maxPressure);
+                device.setMaxX(info.maxLogicalX);
+                device.setMaxY(info.maxLogicalY);
+                device.setSideButtonCount(info.buttonCount);
+                device.setCaps(EnumSet.of(
+                        PenCapability.PRESSURE, PenCapability.TILT, PenCapability.PROXIMITY,
+                        PenCapability.SIDE_BUTTON, PenCapability.ABSOLUTE_MODE));
+                device.setSupportedCursorTypes(EnumSet.of(PenCursorType.PEN, PenCursorType.ERASER));
+                uidToDeviceCache.put(uid, device);
+                log.info("Device added: {} (UID: {})", device.getName(), uid);
+            }
+            devices.add(device);
         }
+
+        // 清理缓存中不存在的设备
+        Set<String> currentUids = new HashSet<>();
+        for (PenDevice d : devices) currentUids.add(d.getUid());
+        uidToDeviceCache.keySet().removeIf(uid -> {
+            if (!currentUids.contains(uid)) {
+                log.info("Device removed from cache: {}", uid);
+                return true;
+            }
+            return false;
+        });
+        return devices;
     }
 
+    @Override
+    public PenEvent pollEvent() {
+        if (wtpContext == null) return null;
+
+        WTPExtendedEvent.ByReference extEvent = new WTPExtendedEvent.ByReference();
+        int got = WTPApi.INSTANCE.WTPPollEventEx(wtpContext, extEvent);
+        if (got != 1) return null;
+
+        String uid = extEvent.getDeviceUid();
+        PenDevice device = uidToDeviceCache.get(uid);
+        if (device == null) {
+            log.warn("Received event from unknown device UID: {}, dropping event", uid);
+            return null;
+        }
+
+        WTPEvent event = extEvent.event;
+        int buttonsMask = event.buttons & 0xFFFF;
+
+        PenState state = PenState.builder()
+                .x(event.x)
+                .y(event.y)
+                .pressure(event.pressure)
+                .tangentialPressure(event.tangentialPressure)
+                .tiltX(event.tiltX)
+                .tiltY(event.tiltY)
+                .azimuth(event.azimuth)
+                .altitude(event.altitude)
+                .twist(event.twist)
+                .roll(event.roll)
+                .pitch(event.pitch)
+                .yaw(event.yaw)
+                .near(event.proximity != 0)
+                .tipPressed(event.tip != 0)
+                .eraserPressed(event.eraser != 0)
+                .buttons(buttonsMask)
+                .cursorType(event.eraser != 0 ? PenCursorType.ERASER : PenCursorType.PEN)
+                .build();
+
+        log.debug("Pen event: UID={}, x={}, y={}, pressure={}, tip={}, eraser={}",
+                uid, event.x, event.y, event.pressure, event.tip, event.eraser);
+
+        return new DefaultPenEvent(device, event.timestamp * 1000L, state);
+    }
+
+    // 内部设备类
     private static class WinTabDevice extends BasePenDevice {
         {
             setName("WinTab Pen");
             setCaps(EnumSet.of(
                     PenCapability.PRESSURE, PenCapability.TILT, PenCapability.PROXIMITY,
                     PenCapability.SIDE_BUTTON, PenCapability.ABSOLUTE_MODE));
-            setSupportedCursorTypes(EnumSet.of(PenCursorType.PEN));
+            setSupportedCursorTypes(EnumSet.of(PenCursorType.PEN, PenCursorType.ERASER));
         }
     }
 }
