@@ -1,57 +1,54 @@
 #pragma once
 /**
- * RIPContext.h - 单个笔输入上下文实现类（支持动态按钮、设备信息查询）
+ * RIPContext.h - 笔输入上下文（多设备，无内部设备缓存，纯轮询）
+ *
+ * 维护最轻量的内部状态：
+ *  1. 消息窗口 + 后台线程（接收 WM_INPUT）
+ *  2. 设备句柄 -> UID 映射（用于填充事件中的 deviceUid）
+ *  3. 统一扩展事件队列（FIFO，最大容量 1024）
+ *
+ * 设备信息查询（GetDeviceCount / GetDeviceInfo）实时通过系统 API 获取，
+ * 不依赖任何历史缓存。HID 解析借助临时 RIPDevice 对象完成。
  */
 #ifndef RIP_CONTEXT_H
 #define RIP_CONTEXT_H
 
 #include <windows.h>
-#include <hidsdi.h>
-#include <hidpi.h>
 #include <atomic>
 #include <queue>
 #include <mutex>
 #include <string>
-#include <vector>
-#include <utility>
-#include "RIPApi.h"
+#include <unordered_map>
+#include <memory>       // unique_ptr（如果缓存解析器则使用）
+#include "RIPApi.h"     // 引入 RIPExtendedEvent, RIPDeviceInfo 等
 
 #define MAX_RIP_EVENT_QUEUE  1024
+
+class RIPDevice;  // 前置声明，解析器类
 
 class RIPContext {
 public:
     RIPContext();
     ~RIPContext();
 
-    RIPStatus Start(RIPEventCallback callback);
+    // 启动消息窗口和后台线程（注册设备、开启消息循环）
+    RIPStatus Start();
     void Stop();
-    int PollEvent(RIPEvent* event);
+
+    // 取出一个带设备标识的事件（非阻塞）
+    int PollEventEx(RIPExtendedEvent* event);
     const char* GetLastError() const { return m_lastError; }
 
-    // 信息查询接口
-    void GetPressureRange(uint32_t& outMin, uint32_t& outMax) const {
-        outMin = (uint32_t)m_logicalMinPressure;
-        outMax = (uint32_t)m_logicalMaxPressure;
-    }
-    void GetLogicalRange(uint32_t& outMaxX, uint32_t& outMaxY) const {
-        outMaxX = (uint32_t)m_logicalMaxX;
-        outMaxY = (uint32_t)m_logicalMaxY;
-    }
-    uint32_t GetButtonCount() const {
-        return m_buttonUsages.empty() ? 0 : (uint32_t)m_buttonUsages.size();
-    }
-    const char* GetDeviceName() const { return m_deviceName.c_str(); }
-    uint16_t GetDeviceVid() const { return m_vid; }
-    uint16_t GetDevicePid() const { return m_pid; }
-    const char* GetDeviceUid() const { return m_uid.c_str(); }
+    // 实时设备枚举（每次调用都直接查询系统）
+    RIPStatus GetDeviceCount(uint32_t* count);
+    RIPStatus GetDeviceInfo(uint32_t index, RIPDeviceInfo* info);
 
 private:
+    // 禁止拷贝
     RIPContext(const RIPContext&) = delete;
     RIPContext& operator=(const RIPContext&) = delete;
 
-    HANDLE m_hInitEvent = nullptr;
-    bool m_initSuccess = false;
-
+    // 窗口线程与过程
     static DWORD WINAPI ThreadProc(LPVOID param);
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -59,59 +56,32 @@ private:
     bool RegisterRawInputDevices();
     void UnregisterRawInputDevices();
 
-    // HID 解析
-    bool InitializeDeviceCache(HANDLE hDevice);
-    void ClearDeviceCache();
-    bool ExtractPenEvent(const BYTE* rawData, DWORD size, RIPEvent& out);
-    void PushEvent(const RIPEvent& ev);
+    // 事件处理
     void HandleRawInput(HRAWINPUT hRawInput);
+    void HandleDeviceChange(WPARAM wParam, HANDLE hDevice);
+    void PushEvent(const RIPExtendedEvent& ev);
 
-    // 设备信息提取
-    void ExtractDeviceInfo(HANDLE hDevice);
+    // 辅助：从设备句柄获取稳定 UID
+    std::string GetOrCreateDeviceUid(HANDLE hDevice);
 
-    // 按钮存储：按顺序按钮1对应索引0，按钮2对应索引1，...
-    struct ButtonDesc {
-        USAGE page;
-        USAGE usage;
-    };
-    std::vector<ButtonDesc> m_buttonUsages;  // 索引 0 = button 1
-
-    // 状态变量
+    // 线程与窗口
     std::atomic<bool> m_running{ false };
-    HWND m_hwnd = nullptr;
-    HANDLE m_hThread = nullptr;
+    HWND               m_hwnd = nullptr;
+    HANDLE             m_hThread = nullptr;
 
-    PHIDP_PREPARSED_DATA m_preparsedData = nullptr;
-    HIDP_CAPS m_caps = { 0 };
-    bool m_deviceCached = false;
+    // 初始化同步
+    HANDLE m_hInitEvent = nullptr;
+    bool   m_initSuccess = false;
 
-    // 用途记录
-    USAGE m_usageX = 0, m_usageY = 0, m_usagePressure = 0, m_usageTiltX = 0, m_usageTiltY = 0;
-    USAGE m_usageTip = 0;
-    USAGE m_usageSerial = 0;
-    USAGE m_pageX = 0, m_pageY = 0, m_pagePressure = 0, m_pageTiltX = 0, m_pageTiltY = 0;
-    USAGE m_pageTip = 0;
-    USAGE m_pageSerial = 0;
-    bool m_hasX = false, m_hasY = false, m_hasPressure = false;
-    bool m_hasTiltX = false, m_hasTiltY = false, m_hasTip = false;
-    bool m_hasSerial = false;
+    // 设备句柄 -> UID 映射（仅用于事件填充，极轻量）
+    std::unordered_map<HANDLE, std::string> m_deviceUidMap;
+    std::mutex m_mapMutex;
 
-    LONG m_logicalMinX = 0, m_logicalMaxX = 65535;
-    LONG m_logicalMinY = 0, m_logicalMaxY = 65535;
-    LONG m_logicalMinPressure = 0, m_logicalMaxPressure = 1023;
-
-
-    // 设备标识
-    std::string m_deviceName;
-    std::string m_uid;
-    std::wstring m_devicePath;
-    USHORT m_vid = 0, m_pid = 0;
-    bool m_uidFinalized = false;
-
-    std::queue<RIPEvent> m_queue;
+    // 统一事件队列（扩展事件，包含 deviceUid）
+    std::queue<RIPExtendedEvent> m_eventQueue;
     std::mutex m_queueMutex;
-    RIPEventCallback m_callback = nullptr;
 
+    // 错误信息
     char m_lastError[256] = { 0 };
 };
 

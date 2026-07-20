@@ -6,191 +6,162 @@ import lombok.extern.slf4j.Slf4j;
 import top.kzre.pen4j.api.*;
 import top.kzre.pen4j.core.BasePenDevice;
 import top.kzre.pen4j.core.DefaultPenEvent;
-import top.kzre.pen4j.core.PenPlatformDriver;
+import top.kzre.pen4j.core.PollPenDriver;
 import top.kzre.pen4j.windows.common.PenVendorVIDTable;
 
 import java.util.*;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
-public class RawInputDriver implements PenPlatformDriver {
-
-    private final AtomicReference<PenListener> listenerRef = new AtomicReference<>();
-    private final List<PenDevice> devices = new ArrayList<>();
-    private final RawInputDevice currentDevice;
+public class RawInputDriver extends PollPenDriver {
 
     private volatile Pointer ripContext;
-    private final AtomicBoolean started = new AtomicBoolean(false);
-    private Thread pollThread;
+    // UID -> 设备对象缓存，用于事件快速查找和枚举时复用对象
+    private final Map<String, PenDevice> uidToDeviceCache = new ConcurrentHashMap<>();
 
     public RawInputDriver() {
-        currentDevice = new RawInputDevice();
-        devices.add(currentDevice);
     }
 
     @Override
     public boolean isAvailable() {
-        return true;   // 假设 DLL 已正确加载
+        return true;   // 可在此检查 DLL 是否存在
     }
 
     @Override
-    public List<PenDevice> getDevices() {
-        return Collections.unmodifiableList(devices);
-    }
-
-    @Override
-    public void start(PenListener listener) {
-        Objects.requireNonNull(listener);
-        if (started.getAndSet(true)) {
-            log.warn("RawInputDriver already started");
-            return;
-        }
-        listenerRef.set(listener);
-        listener.onDeviceAdded(currentDevice);
-
-        // 1. 创建 RIP 上下文
+    public void onStart() {
+        log.debug("Creating RIP context...");
         ripContext = RIPApi.INSTANCE.RIPCreate();
         if (ripContext == null) {
             throw new RuntimeException("RIPCreate failed");
         }
-
-        // 2. 启动监听（不使用回调，用轮询模式）
-        int status = RIPApi.INSTANCE.RIPStart(ripContext, null);
+        int status = RIPApi.INSTANCE.RIPStart(ripContext);
         if (status != 0) {
             String err = RIPApi.INSTANCE.RIPGetLastError(ripContext);
+            log.error("RIPStart failed: {}", err);
             RIPApi.INSTANCE.RIPDestroy(ripContext);
             ripContext = null;
             throw new RuntimeException("RIPStart failed: " + err);
         }
-
-        // 3. 动态查询并更新设备信息
-        queryAndUpdateDeviceInfo();
-
-        // 4. 启动轮询线程
-        pollThread = new Thread(this::pollLoop, "RawInput-Poll");
-        pollThread.setDaemon(true);
-        pollThread.start();
-
-        log.info("RawInputDriver started (RIP)");
+        log.info("RawInputDriver started successfully");
     }
 
     @Override
-    public void stop() {
-        if (!started.getAndSet(false)) return;
-
-        if (pollThread != null) {
-            pollThread.interrupt();
-            try {
-                pollThread.join(1000);
-            } catch (InterruptedException ignored) {}
-            pollThread = null;
-        }
-
+    public void onStop() {
         if (ripContext != null) {
             RIPApi.INSTANCE.RIPStop(ripContext);
             RIPApi.INSTANCE.RIPDestroy(ripContext);
             ripContext = null;
         }
-
-        listenerRef.set(null);
+        uidToDeviceCache.clear();
         log.info("RawInputDriver stopped");
     }
 
-    private void queryAndUpdateDeviceInfo() {
-        if (ripContext == null) return;
-
-        // 压力范围
-        IntByReference minP = new IntByReference();
-        IntByReference maxP = new IntByReference();
-        if (RIPApi.INSTANCE.RIPGetPressureRange(ripContext, minP, maxP) == 0) {
-            currentDevice.setMaxPressure(maxP.getValue());
+    @Override
+    public List<PenDevice> enumerateDevices() {
+        log.debug("Enumerating pen devices...");
+        List<PenDevice> devices = new ArrayList<>();
+        if (ripContext == null) {
+            return devices;
         }
 
-        // 坐标范围
-        IntByReference maxX = new IntByReference();
-        IntByReference maxY = new IntByReference();
-        if (RIPApi.INSTANCE.RIPGetLogicalRange(ripContext, maxX, maxY) == 0) {
-            currentDevice.setMaxX(maxX.getValue());
-            currentDevice.setMaxY(maxY.getValue());
+        IntByReference countRef = new IntByReference();
+        int ret = RIPApi.INSTANCE.RIPGetDeviceCount(ripContext, countRef);
+        if (ret != 0) {
+            log.error("Failed to get device count: {}", RIPApi.INSTANCE.RIPGetLastError(ripContext));
+            return devices;
         }
+        int count = countRef.getValue();
+        log.debug("Found {} pen device(s)", count);
 
-        // 按钮数量
-        IntByReference btnCount = new IntByReference();
-        if (RIPApi.INSTANCE.RIPGetButtonCount(ripContext, btnCount) == 0) {
-            currentDevice.setSideButtonCount(btnCount.getValue());
-        }
-
-        // 设备名称
-        String name = RIPApi.INSTANCE.RIPGetDeviceName(ripContext);
-        if (name != null && !name.isEmpty()) {
-            currentDevice.setName(name);
-        }
-
-        // VID / PID 并映射厂商名（使用公共表）
-        IntByReference vidRef = new IntByReference();
-        if (RIPApi.INSTANCE.RIPGetDeviceVid(ripContext, vidRef) == 0) {
-            int vid = vidRef.getValue();
-            currentDevice.setVid(vid);
-            String vendor = PenVendorVIDTable.getVendorName(vid);
-            currentDevice.setVendor(vendor);
-        }
-        IntByReference pidRef = new IntByReference();
-        if (RIPApi.INSTANCE.RIPGetDevicePid(ripContext, pidRef) == 0) {
-            currentDevice.setPid(pidRef.getValue());
-        }
-
-        // 唯一标识符
-        String uid = RIPApi.INSTANCE.RIPGetDeviceUid(ripContext);
-        if (uid != null && !uid.isEmpty()) {
-            currentDevice.setUid(uid);
-        }
-    }
-
-    private void pollLoop() {
-        RIPEvent.ByReference event = new RIPEvent.ByReference();
-        while (started.get() && ripContext != null) {
-//            String error = RIPApi.INSTANCE.RIPGetLastError(ripContext);
-//            log.error("rip error: {}", error);
-            int got = RIPApi.INSTANCE.RIPPollEvent(ripContext, event);
-            if (got == 1) {
-                PenListener listener = listenerRef.get();
-                if (listener != null) {
-                    int buttonsMask = event.buttons & 0xFFFF;
-
-                    PenState state = PenState.builder()
-                            .x((int) event.x)
-                            .y((int) event.y)
-                            .pressure(event.pressure)
-                            .tiltX(event.tiltX)
-                            .tiltY(event.tiltY)
-                            .near(true)
-                            .tipPressed(event.tip != 0)
-                            .buttons(buttonsMask)
-                            .eraserPressed(false)
-                            .cursorType(PenCursorType.PEN)
-                            .build();
-
-                    PenEvent penEvent = new DefaultPenEvent(currentDevice,
-                            System.currentTimeMillis() * 1000, state);
-                    listener.onPenData(penEvent);
-                }
-            } else {
-                try {
-                    Thread.sleep(1);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
+        for (int i = 0; i < count; i++) {
+            RIPDeviceInfo info = new RIPDeviceInfo();
+            ret = RIPApi.INSTANCE.RIPGetDeviceInfo(ripContext, i, info);
+            if (ret != 0) {
+                log.warn("Failed to get device info for index {}: {}", i, RIPApi.INSTANCE.RIPGetLastError(ripContext));
+                continue;
             }
+            String uid = info.getUid();
+            // 尝试复用已有的设备对象，保持引用稳定性
+            RawInputDevice device = (RawInputDevice) uidToDeviceCache.get(uid);
+            if (device == null) {
+                device = new RawInputDevice();
+                device.setUid(uid);
+                device.setName(info.getDeviceName());
+                device.setVid(info.vid & 0xFFFF);
+                device.setPid(info.pid & 0xFFFF);
+                device.setVendor(PenVendorVIDTable.getVendorName(device.getVid()));
+                device.setMaxPressure(info.maxPressure);
+                device.setMaxX(info.maxLogicalX);
+                device.setMaxY(info.maxLogicalY);
+                device.setSideButtonCount(info.buttonCount);
+                device.setCaps(EnumSet.of(PenCapability.PRESSURE, PenCapability.TILT));
+                device.setSupportedCursorTypes(EnumSet.of(PenCursorType.PEN));
+                uidToDeviceCache.put(uid, device);
+                log.info("Device added: {} (UID: {})", device.getName(), uid);
+            }
+            devices.add(device);
         }
+
+        // 清理缓存中已经不存在的设备
+        Set<String> currentUids = new HashSet<>();
+        for (PenDevice d : devices) {
+            currentUids.add(d.getUid());
+        }
+        uidToDeviceCache.keySet().removeIf(uid -> {
+            if (!currentUids.contains(uid)) {
+                log.info("Device removed: {}", uid);
+                return true;
+            }
+            return false;
+        });
+
+        return devices;
     }
 
-    private static class RawInputDevice extends BasePenDevice {
-        {
-            setName("Raw Input Pen");
-            setCaps(EnumSet.of(PenCapability.PRESSURE, PenCapability.TILT));
-            setSupportedCursorTypes(EnumSet.of(PenCursorType.PEN));
+    @Override
+    public PenEvent pollEvent() {
+        if (ripContext == null) {
+            return null;
         }
+
+        RIPExtendedEvent.ByReference extEvent = new RIPExtendedEvent.ByReference();
+        int got = RIPApi.INSTANCE.RIPPollEventEx(ripContext, extEvent);
+        if (got != 1) {
+            return null;
+        }
+
+        String uid = extEvent.getDeviceUid();
+        PenDevice device = uidToDeviceCache.get(uid);
+        if (device == null) {
+            // 设备未知，将在外部由模板触发即时探测，此处记录警告
+            log.warn("Received event from unknown device UID: {}, dropping event", uid);
+            return null;
+        }
+
+        RIPEvent event = extEvent.event;
+        int buttonsMask = event.buttons & 0xFFFF;
+
+        // 少量调试日志，便于追踪事件流（生产环境可关闭）
+        log.debug("Pen event: UID={}, x={}, y={}, pressure={}, tip={}, buttons={}",
+                uid, event.x, event.y, event.pressure, event.tip, buttonsMask);
+
+        PenState state = PenState.builder()
+                .x((int) event.x)
+                .y((int) event.y)
+                .pressure(event.pressure)
+                .tiltX(event.tiltX)
+                .tiltY(event.tiltY)
+                .near(true)
+                .tipPressed(event.tip != 0)
+                .buttons(buttonsMask)
+                .eraserPressed(false)
+                .cursorType(PenCursorType.PEN)
+                .build();
+
+        return new DefaultPenEvent(device, event.timestamp * 1000L, state);
+    }
+
+    // 内部设备类，仅作为数据容器
+    private static class RawInputDevice extends BasePenDevice {
     }
 }

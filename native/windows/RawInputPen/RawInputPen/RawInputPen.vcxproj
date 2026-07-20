@@ -130,11 +130,13 @@
   <ItemGroup>
     <ClCompile Include="RIPContext.cpp" />
     <ClCompile Include="DllMain.cpp" />
+    <ClCompile Include="RIPDevice.cpp" />
+    <ClCompile Include="RIPExports.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="RIPApi.h" />
     <ClInclude Include="RIPContext.h" />
-    <ClInclude Include="RIPUsageOffsets.h" />
+    <ClInclude Include="RIPDevice.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

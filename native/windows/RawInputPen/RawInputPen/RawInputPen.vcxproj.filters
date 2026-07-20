@@ -21,15 +21,21 @@
     <ClCompile Include="RIPContext.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="RIPExports.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="RIPDevice.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="RIPUsageOffsets.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
     <ClInclude Include="RIPApi.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="RIPContext.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="RIPDevice.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>

@@ -1,14 +1,16 @@
 #pragma once
 /**
- * RIPApi.h - Raw Input Pen 胶水层公开接口
- * 1. 多设备管理
- * 2. 设备发现事件
- * 3. 轮询优于通知
+ * RIPApi.h - Raw Input Pen 胶水层公开接口（多设备，无内部缓存）
+ *
+ * 设计原则：
+ *  1. 多设备管理 - 实时枚举系统连接的笔设备，不做内部缓存
+ *  2. 轮询驱动   - 通过 RIPPollEventEx 获取带设备标识的事件
+ *  3. 轻量映射   - 事件到来时仅维护设备句柄到路径的映射（用于填充 deviceUid）
+ *  4. 无热插拔通知 - Java 层通过定时枚举或事件中发现新 UID 来处理设备变更
  */
 #ifndef RIP_API_H
 #define RIP_API_H
 
- // 导出宏
 #ifdef RAWINPUTPEN_EXPORTS
 #define RIPAPI __declspec(dllexport)
 #else
@@ -21,30 +23,44 @@ extern "C" {
 
 #include <stdint.h>
 
-    /* 不透明上下文句柄（C++ 中为 class，C 中为 struct） */
 #ifdef __cplusplus
     class RIPContext;
 #else
     typedef struct RIPContext RIPContext;
 #endif
 
-    /* 笔事件数据 */
+    /* ── 笔事件数据（不变） ── */
     typedef struct {
-        uint32_t timestamp;   /**< 毫秒时间戳 */
-        float    x;           /**< 逻辑 X 坐标（屏幕像素） */
-        float    y;           /**< 逻辑 Y 坐标（屏幕像素） */
-        float    pressure;    /**< 设备原始压力值（未归一化） */
-        float    tiltX;       /**< 倾斜 X（度） */
-        float    tiltY;       /**< 倾斜 Y（度） */
-        uint8_t  tip;         /**< 笔尖接触 (0/1) */
-        uint8_t  reserved;    /**< 保留字节，对齐用 */
-        uint16_t buttons;     /**< 按钮位掩码：bit0=button1, bit1=button2, ... */
+        uint32_t timestamp;   /* 毫秒时间戳 */
+        float    x;           /* 逻辑 X 坐标（屏幕像素） */
+        float    y;           /* 逻辑 Y 坐标（屏幕像素） */
+        float    pressure;    /* 设备原始压力值（未归一化） */
+        float    tiltX;       /* 倾斜 X（度） */
+        float    tiltY;       /* 倾斜 Y（度） */
+        uint8_t  tip;         /* 笔尖接触 (0/1) */
+        uint8_t  reserved;    /* 保留 */
+        uint16_t buttons;     /* 按钮位掩码 */
     } RIPEvent;
 
-    /* 回调函数类型 */
-    typedef void (*RIPEventCallback)(const RIPEvent* event);
+    /* ── 设备信息（枚举时返回） ── */
+    typedef struct {
+        char     deviceName[128];  /* UTF-8 设备名称 */
+        char     uid[256];         /* 唯一标识符（设备路径或序列号） */
+        uint16_t vid;
+        uint16_t pid;
+        uint32_t maxPressure;
+        uint32_t maxLogicalX;
+        uint32_t maxLogicalY;
+        uint32_t buttonCount;      /* 笔身按钮数量 */
+        uint32_t reserved;
+    } RIPDeviceInfo;
 
-    /* 状态码 */
+    /* ── 扩展笔事件（携带设备 UID） ── */
+    typedef struct {
+        char     deviceUid[256];   /* 产生事件的设备唯一标识 */
+        RIPEvent event;
+    } RIPExtendedEvent;
+
     typedef enum {
         RIP_OK = 0,
         RIP_ERR_ALREADY_STARTED,
@@ -53,101 +69,33 @@ extern "C" {
         RIP_ERR_UNKNOWN
     } RIPStatus;
 
-    /**
-     * 创建笔输入上下文。
-     * @return 新上下文指针，失败返回 NULL。
-     */
+    /* ── 上下文生命周期 ── */
     RIPAPI RIPContext* RIPCreate(void);
+    RIPAPI void        RIPDestroy(RIPContext* ctx);
+    RIPAPI RIPStatus   RIPStart(RIPContext* ctx);   /* 不再接受回调，仅轮询模式 */
+    RIPAPI void        RIPStop(RIPContext* ctx);
+
+    /* ── 事件轮询（多设备） ── */
+    /**
+     * 非阻塞轮询一个带设备标识的笔事件。
+     * @return 1=有事件，0=队列空
+     */
+    RIPAPI int RIPPollEventEx(RIPContext* ctx, RIPExtendedEvent* event);
+
+    /* ── 设备实时枚举（每次调用均查询系统） ── */
+    /**
+     * 获取当前已连接的笔设备数量。
+     */
+    RIPAPI RIPStatus RIPGetDeviceCount(RIPContext* ctx, uint32_t* count);
 
     /**
-     * 销毁上下文（自动停止监听并释放资源）。
+     * 获取指定索引的设备信息。
+     * @param index 从 0 到 count-1
      */
-    RIPAPI void RIPDestroy(RIPContext* ctx);
+    RIPAPI RIPStatus RIPGetDeviceInfo(RIPContext* ctx, uint32_t index, RIPDeviceInfo* info);
 
-    /**
-     * 启动后台监听。
-     * @param ctx      上下文
-     * @param callback 事件回调（可为 NULL，仅使用轮询）
-     */
-    RIPAPI RIPStatus RIPStart(RIPContext* ctx, RIPEventCallback callback);
-
-    /**
-     * 停止监听，但保留上下文对象可再次启动。
-     */
-    RIPAPI void RIPStop(RIPContext* ctx);
-
-    /**
-     * 非阻塞轮询一个笔事件。
-     * @param ctx   上下文
-     * @param event 输出事件
-     * @return 1=取到事件，0=队列空
-     */
-    RIPAPI int RIPPollEvent(RIPContext* ctx, RIPEvent* event);
-
-    /**
-     * 获取指定上下文的最后一次错误信息。
-     * @return 静态字符串，上下文销毁后失效
-     */
+    /* ── 错误信息 ── */
     RIPAPI const char* RIPGetLastError(RIPContext* ctx);
-
-    /**
-     * 获取压力逻辑范围（设备原始值）。
-     * @param ctx   上下文
-     * @param min   输出：最小压力（通常为 0）
-     * @param max   输出：最大压力（例如 2047）
-     * @return 状态码
-     */
-    RIPAPI RIPStatus RIPGetPressureRange(RIPContext* ctx, uint32_t* min, uint32_t* max);
-
-    /**
-     * 获取坐标逻辑范围（设备原始值）。
-     * @param ctx   上下文
-     * @param maxX  输出：X 轴最大逻辑值
-     * @param maxY  输出：Y 轴最大逻辑值
-     * @return 状态码
-     */
-    RIPAPI RIPStatus RIPGetLogicalRange(RIPContext* ctx, uint32_t* maxX, uint32_t* maxY);
-
-    /**
-     * 获取可用的笔杆按钮数量。
-     * @param ctx   上下文
-     * @param count 输出：按钮数量（不包括笔尖）
-     * @return 状态码
-     */
-    RIPAPI RIPStatus RIPGetButtonCount(RIPContext* ctx, uint32_t* count);
-
-    /**
-     * 获取设备名称（基于 VID/PID 组合的默认描述）。
-     * @param ctx 上下文
-     * @return UTF-8 字符串，静态缓冲，下次调用可能覆盖，上下文销毁后失效。
-     *         格式示例："Pen (VID_056A&PID_0087)"
-     */
-    RIPAPI const char* RIPGetDeviceName(RIPContext* ctx);
-
-    /**
-     * 获取设备的 USB VID（vendor ID）。
-     * @param ctx 上下文
-     * @param vid 输出：vendor ID
-     * @return 状态码
-     */
-    RIPAPI RIPStatus RIPGetDeviceVid(RIPContext* ctx, uint16_t* vid);
-
-    /**
-     * 获取设备的 USB PID（product ID）。
-     * @param ctx 上下文
-     * @param pid 输出：product ID
-     * @return 状态码
-     */
-    RIPAPI RIPStatus RIPGetDevicePid(RIPContext* ctx, uint16_t* pid);
-
-    /**
-     * 获取设备唯一标识符。
-     * 优先使用笔的物理序列号（若支持），否则使用设备路径。
-     * @param ctx 上下文
-     * @return UTF-8 字符串，静态缓冲，下次调用可能覆盖，上下文销毁后失效。
-     *         失败返回空字符串。
-     */
-    RIPAPI const char* RIPGetDeviceUid(RIPContext* ctx);
 
 #ifdef __cplusplus
 }
